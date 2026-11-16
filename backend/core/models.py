@@ -66,13 +66,17 @@ class Course(models.Model):
 
 class CourseLevel(models.Model):
     """
-    CourseLevel represents a learning tier/level within a Course (e.g., Level 1, Level 2, Level 3).
-    Modules are assigned to a level within the course.
+    Independent Level entity (e.g. Level 1, Level 2, Level 3).
+    Levels can exist independently without a parent Course, or optionally be associated with one.
+    Modules are assigned directly to a Level.
     """
     course = models.ForeignKey(
         Course,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="levels",
+        help_text="Optional Course this level is associated with",
     )
     name = models.CharField(max_length=100, help_text="e.g. Level 1, Level 2, Level 3")
     order = models.PositiveIntegerField(default=1, help_text="Sequence order within the Course")
@@ -95,29 +99,30 @@ class CourseLevel(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.course.code} - {self.name}"
+        if self.course:
+            return f"{self.course.code} - {self.name}"
+        return self.name
 
 
 class Module(models.Model):
     """
-    Module belonging to a Course. Unit of study where completion questions are administered.
-    Can be assigned to an optional CourseLevel belonging to the same Course.
+    Module belonging directly to a Level, and optionally to a Course. Unit of study where completion questions are administered.
     """
     course = models.ForeignKey(
         Course,
-        on_delete=models.CASCADE,
-        related_name="modules",
-    )
-    level = models.ForeignKey(
-        CourseLevel,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name="modules",
-        help_text="Optional CourseLevel grouping this module belongs to",
+        help_text="Optional legacy Course reference",
+    )
+    level = models.ForeignKey(
+        CourseLevel,
+        on_delete=models.PROTECT,
+        related_name="modules",
+        help_text="CourseLevel grouping this module belongs to",
     )
     name = models.CharField(max_length=200)
-    code = models.CharField(max_length=50)
     description = models.TextField(blank=True)
     order = models.PositiveIntegerField(default=1, help_text="Sequence order within the Course")
     estimated_duration_minutes = models.PositiveIntegerField(
@@ -144,10 +149,6 @@ class Module(models.Model):
         ordering = ["course", "order", "name"]
         constraints = [
             models.UniqueConstraint(
-                fields=["course", "code"],
-                name="unique_module_code_per_course",
-            ),
-            models.UniqueConstraint(
                 fields=["course", "order"],
                 name="unique_module_order_per_course",
             ),
@@ -155,7 +156,10 @@ class Module(models.Model):
 
     def clean(self):
         super().clean()
-        if self.level and self.level.course_id != self.course_id:
+        if not self.level_id:
+            from django.core.exceptions import ValidationError
+            raise ValidationError({"level": "A module must be assigned directly to a level."})
+        if self.course_id and self.level.course_id and self.level.course_id != self.course_id:
             from django.core.exceptions import ValidationError
             raise ValidationError({
                 "level": f"The assigned level '{self.level.name}' belongs to course '{self.level.course.code}', but this module belongs to course '{self.course.code}'."
@@ -166,7 +170,8 @@ class Module(models.Model):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.course.code} - Module {self.order}: {self.name}"
+        prefix = f"{self.course.code} - " if self.course else ""
+        return f"{prefix}Module {self.order}: {self.name}"
 
 
 class Submodule(models.Model):
@@ -335,16 +340,24 @@ class TrainerGroupAssignment(models.Model):
 class TrainingAssignment(models.Model):
     """
     Direct assignment of learning content to a recipient.
-    Target must be exactly one curriculum unit: Course or Module.
+    Target must be exactly one curriculum unit: Course, Level, or Module.
     Recipient must be exactly one: LearnerGroup, CandidateType, or Individual Learner.
     """
     course = models.ForeignKey(
         Course,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="training_assignments",
+        help_text="Target course if assigning a whole course",
+    )
+    level = models.ForeignKey(
+        CourseLevel,
         on_delete=models.CASCADE,
         null=True,
         blank=True,
         related_name="training_assignments",
-        help_text="Target course if assigning a single course",
+        help_text="Target level if assigning a specific level directly",
     )
     module = models.ForeignKey(
         Module,
@@ -409,7 +422,24 @@ class TrainingAssignment(models.Model):
                 name="unique_assign_course_learner",
             ),
 
-            # 2. Module Target Combinations
+            # 2. Level Target Combinations
+            models.UniqueConstraint(
+                fields=["level", "learner_group"],
+                condition=models.Q(level__isnull=False, learner_group__isnull=False),
+                name="unique_assign_level_group",
+            ),
+            models.UniqueConstraint(
+                fields=["level", "candidate_type"],
+                condition=models.Q(level__isnull=False, candidate_type__isnull=False),
+                name="unique_assign_level_candidate_type",
+            ),
+            models.UniqueConstraint(
+                fields=["level", "learner"],
+                condition=models.Q(level__isnull=False, learner__isnull=False),
+                name="unique_assign_level_learner",
+            ),
+
+            # 3. Module Target Combinations
             models.UniqueConstraint(
                 fields=["module", "learner_group"],
                 condition=models.Q(module__isnull=False, learner_group__isnull=False),
@@ -428,13 +458,13 @@ class TrainingAssignment(models.Model):
         ]
 
     def clean(self):
-        # Enforce that exactly one curriculum target is specified: Course or Module
-        targets = [bool(self.course), bool(self.module)]
+        # Enforce that exactly one curriculum target is specified: Course, Level, or Module
+        targets = [bool(self.course), bool(self.level), bool(self.module)]
         target_count = sum(targets)
         if target_count == 0:
-            raise ValidationError("A training assignment must specify exactly one curriculum target: Course or Module.")
+            raise ValidationError("A training assignment must specify exactly one curriculum target: Course, Level, or Module.")
         if target_count > 1:
-            raise ValidationError("A training assignment cannot target a Course or Module simultaneously. Specify exactly one target.")
+            raise ValidationError("A training assignment cannot target a Course, Level, or Module simultaneously. Specify exactly one target.")
 
         # Enforce exactly one recipient type
         recipients = [bool(self.learner_group), bool(self.candidate_type), bool(self.learner)]
@@ -454,6 +484,8 @@ class TrainingAssignment(models.Model):
     def __str__(self):
         if self.module:
             target = f"Module: {self.module.name}"
+        elif self.level:
+            target = f"Level: {self.level.name}"
         elif self.course:
             target = f"Course: {self.course.name}"
         else:
@@ -859,14 +891,16 @@ class TrainingFile(models.Model):
 
 class TrainingCluster(models.Model):
     """
-    High-level topic cluster grouping training modules and materials, scoped to a course.
+    High-level topic cluster grouping training modules and materials, optionally scoped to a course.
     E.g., 'Cluster 1: Organizational Identity & Staffing Fundamentals'.
     """
     course = models.ForeignKey(
         Course,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="training_clusters",
-        help_text="Course this training cluster belongs to",
+        help_text="Optional Course this training cluster belongs to",
     )
     name = models.CharField(
         max_length=200,
@@ -901,7 +935,9 @@ class TrainingCluster(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.course.code} - {self.code}: {self.name}"
+        if self.course:
+            return f"{self.course.code} - {self.code}: {self.name}"
+        return f"{self.code}: {self.name}"
 
 
 class DocumentCategory(models.TextChoices):
@@ -916,9 +952,10 @@ class DocumentCategory(models.TextChoices):
 
 class TrainingFileMapping(models.Model):
     """
-    Logical mapping connecting a physical TrainingFile to a Cluster, Module, or Lesson (Submodule).
+    Logical mapping connecting a physical TrainingFile to a Module or Lesson (Submodule),
+    with optional legacy Cluster association.
     Supports M:N mapping: one file can map to multiple lessons, one lesson can contain multiple files.
-    Also supports cluster-level or module-level documents where no specific lesson applies.
+    Also supports module-level documents where no specific lesson applies.
     """
     training_file = models.ForeignKey(
         TrainingFile,
@@ -928,9 +965,11 @@ class TrainingFileMapping(models.Model):
     )
     cluster = models.ForeignKey(
         TrainingCluster,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="file_mappings",
-        help_text="The topic cluster this file is classified under",
+        help_text="Optional legacy topic cluster this file is classified under",
     )
     module = models.ForeignKey(
         Module,
@@ -965,11 +1004,17 @@ class TrainingFileMapping(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["cluster", "module", "submodule", "training_file"]
+        ordering = ["module", "submodule", "training_file"]
         constraints = [
             models.UniqueConstraint(
-                fields=["training_file", "cluster", "module", "submodule"],
-                name="unique_file_cluster_module_submodule_mapping",
+                fields=["training_file", "module", "submodule"],
+                condition=models.Q(submodule__isnull=False),
+                name="unique_file_module_submodule_mapping",
+            ),
+            models.UniqueConstraint(
+                fields=["training_file", "module"],
+                condition=models.Q(submodule__isnull=True),
+                name="unique_file_module_mapping",
             ),
         ]
 
@@ -977,14 +1022,20 @@ class TrainingFileMapping(models.Model):
         # Validate that if submodule is provided, it belongs to module
         if self.submodule and self.module and self.submodule.module_id != self.module_id:
             raise ValidationError({"submodule": "The selected lesson does not belong to the selected module."})
-        # Validate that if module is provided, it belongs to the same course as cluster
-        if self.module and self.cluster and self.module.course_id != self.cluster.course_id:
+        # Validate course consistency only when both module and cluster specify a course
+        if (
+            self.module
+            and self.cluster
+            and self.module.course_id is not None
+            and self.cluster.course_id is not None
+            and self.module.course_id != self.cluster.course_id
+        ):
             raise ValidationError({"module": "The selected module belongs to a different course than the cluster."})
 
     def __str__(self):
-        loc = f"Cluster: {self.cluster.code}"
+        loc = f"Cluster: {self.cluster.code}" if self.cluster else "No Cluster"
         if self.module:
-            loc += f" -> Mod: {self.module.code}"
+            loc += f" -> Mod: {self.module.name}"
         if self.submodule:
             loc += f" -> Lesson: {self.submodule.order}"
         return f"{self.training_file.filename} [{self.category}] ({loc})"

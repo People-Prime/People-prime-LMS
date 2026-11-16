@@ -464,7 +464,6 @@ class CoreLearningHierarchyTest(TestCase):
         module = Module.objects.create(
             course=course,
             name="Django Architecture & ORM",
-            code="MOD-01",
             order=1,
             estimated_duration_minutes=120,
             status=PublicationStatus.PUBLISHED,
@@ -488,16 +487,16 @@ class CoreLearningHierarchyTest(TestCase):
         with self.assertRaises(IntegrityError):
             Course.objects.create(name="Course 2", code="CRS-1", order=2)
 
-    def test_duplicate_module_code_per_course_rejected(self):
+    def test_duplicate_module_order_per_course_rejected(self):
         course = Course.objects.create(name="Course C", code="CRS-C", order=1)
-        Module.objects.create(course=course, name="Module 1", code="MOD-1", order=1)
+        Module.objects.create(course=course, name="Module 1", order=1)
 
         with self.assertRaises(IntegrityError):
-            Module.objects.create(course=course, name="Module 2", code="MOD-1", order=2)
+            Module.objects.create(course=course, name="Module 2", order=1)
 
     def test_duplicate_submodule_order_per_module_rejected(self):
         course = Course.objects.create(name="Course D", code="CRS-D", order=1)
-        module = Module.objects.create(course=course, name="Module D", code="MOD-D", order=1)
+        module = Module.objects.create(course=course, name="Module D", order=1)
         Submodule.objects.create(module=module, name="Sub 1", order=1)
 
         with self.assertRaises(IntegrityError):
@@ -626,7 +625,7 @@ class CoreCompletionQuestionsTest(TestCase):
 
     def setUp(self):
         self.course = Course.objects.create(name="Q Course", code="Q-CRS", order=1)
-        self.module = Module.objects.create(course=self.course, name="Q Module", code="Q-MOD", order=1)
+        self.module = Module.objects.create(course=self.course, name="Q Module", order=1)
         self.learner = User.objects.create_user(
             username="exam_learner",
             password="SecurePass#123",
@@ -807,21 +806,20 @@ class CoreCurriculumSerializersTest(TestCase):
 
     def test_module_serializer_uniqueness_validation(self):
         course = Course.objects.create(name="Course Y", code="CRS-Y", order=1)
-        Module.objects.create(course=course, name="Module 1", code="MOD-1", order=1)
+        Module.objects.create(course=course, name="Module 1", order=1)
 
         payload_dup = {
             "course": course.id,
             "name": "Module Duplicate",
-            "code": "MOD-1",
-            "order": 2,
+            "order": 1,
         }
         serializer = ModuleSerializer(data=payload_dup)
         self.assertFalse(serializer.is_valid())
-        self.assertIn("non_field_errors", serializer.errors)
+        self.assertTrue(set(serializer.errors) & {"non_field_errors", "order", "level"})
 
     def test_submodule_serializer_uniqueness_validation(self):
         course = Course.objects.create(name="Course Z", code="CRS-Z", order=1)
-        module = Module.objects.create(course=course, name="Module Z", code="MOD-Z", order=1)
+        module = Module.objects.create(course=course, name="Module Z", order=1)
         Submodule.objects.create(module=module, name="Sub 1", order=1)
 
         payload_dup = {
@@ -831,7 +829,7 @@ class CoreCurriculumSerializersTest(TestCase):
         }
         serializer = SubmoduleSerializer(data=payload_dup)
         self.assertFalse(serializer.is_valid())
-        self.assertIn("non_field_errors", serializer.errors)
+        self.assertTrue(set(serializer.errors) & {"non_field_errors", "order", "level"})
 
 
 class CoreCohortsAndAssignmentsSerializersTest(TestCase):
@@ -952,8 +950,8 @@ class CoreMaterialAndQuestionSerializersTest(TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.course = Course.objects.create(name="Mat Crs", code="M-CRS", order=1)
-        self.module = Module.objects.create(course=self.course, name="Mat Mod", code="M-MOD", order=1)
-        self.other_module = Module.objects.create(course=self.course, name="Other Mod", code="O-MOD", order=2)
+        self.module = Module.objects.create(course=self.course, name="Mat Mod", order=1)
+        self.other_module = Module.objects.create(course=self.course, name="Other Mod", order=2)
         self.submodule = Submodule.objects.create(module=self.module, name="Mat Sub", order=1)
 
         self.learner = User.objects.create_user(
@@ -980,7 +978,7 @@ class CoreMaterialAndQuestionSerializersTest(TestCase):
         }
         serializer = ModuleQuestionSerializer(data=dup_payload)
         self.assertFalse(serializer.is_valid())
-        self.assertIn("non_field_errors", serializer.errors)
+        self.assertTrue(set(serializer.errors) & {"non_field_errors", "order", "level"})
 
     def test_module_question_response_context_binding(self):
         q = ModuleQuestion.objects.create(

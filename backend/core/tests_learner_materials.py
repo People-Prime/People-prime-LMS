@@ -67,7 +67,6 @@ class LearnerMaterialsSecurityTests(TestCase):
         self.module = Module.objects.create(
             course=self.course,
             name="Module A",
-            code="MOD-A",
             order=1,
             status=PublicationStatus.PUBLISHED,
         )

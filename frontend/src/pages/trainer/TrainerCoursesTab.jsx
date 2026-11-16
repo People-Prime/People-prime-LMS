@@ -57,16 +57,34 @@ export default function TrainerCoursesTab() {
     return courses.filter((c) => c.status === "PUBLISHED");
   }, [courses]);
 
-  // Active levels for the primary course (Course 6 or first published course)
+  const publishedCourseIds = useMemo(() => {
+    return new Set(publishedCourses.map((c) => c.id));
+  }, [publishedCourses]);
+
+  // Filter to published modules whose parent course (if any) is also published
+  const publishedModules = useMemo(() => {
+    return modules.filter(
+      (m) => m.status === "PUBLISHED" && (!m.course || publishedCourseIds.has(m.course))
+    );
+  }, [modules, publishedCourseIds]);
+
+  // Active levels: independent levels with published modules, or levels under published courses
   const activeLevels = useMemo(() => {
-    const targetCourseId = publishedCourses[0]?.id || 6;
     return courseLevels
-      .filter((lvl) => lvl.course === targetCourseId)
+      .filter((lvl) => {
+        if (lvl.course) {
+          return publishedCourseIds.has(lvl.course);
+        }
+        return publishedModules.some((m) => m.level === lvl.id);
+      })
       .sort((a, b) => (a.order || 0) - (b.order || 0));
-  }, [courseLevels, publishedCourses]);
+  }, [courseLevels, publishedCourseIds, publishedModules]);
 
   const handleOpenModule = (courseId, moduleId) => {
-    window.open(`/learner/module-viewer?courseId=${courseId}&moduleId=${moduleId}`, "_blank");
+    const query = courseId
+      ? `?courseId=${courseId}&moduleId=${moduleId}`
+      : `?moduleId=${moduleId}`;
+    window.open(`/learner/module-viewer${query}`, "_blank");
   };
 
   if (loading) {
@@ -105,9 +123,11 @@ export default function TrainerCoursesTab() {
   // LEVEL DETAIL VIEW: Displays modules assigned to the selected level
   // ---------------------------------------------------------------------------
   if (selectedLevel) {
-    const parentCourse = courses.find((c) => c.id === selectedLevel.course) || courses[0];
-    const levelModules = modules
-      .filter((m) => m.level === selectedLevel.id && m.course === selectedLevel.course)
+    const parentCourse = selectedLevel.course
+      ? courses.find((c) => c.id === selectedLevel.course) || null
+      : null;
+    const levelModules = publishedModules
+      .filter((m) => m.level === selectedLevel.id)
       .sort((a, b) => (a.order || 0) - (b.order || 0));
 
     return (
@@ -125,7 +145,7 @@ export default function TrainerCoursesTab() {
             </button>
             <div>
               <div style={{ fontSize: "12px", fontFamily: "var(--font-mono)", color: "var(--accent-secondary)" }}>
-                {parentCourse?.name || "Curriculum"} &bull; Tier #{selectedLevel.order}
+                {parentCourse?.name || selectedLevel.course_name || "Independent Curriculum"} &bull; Tier #{selectedLevel.order}
               </div>
               <h2 style={{ fontSize: "18px", fontWeight: "700", margin: 0, color: "var(--text-main)" }}>
                 {selectedLevel.name}
@@ -161,22 +181,17 @@ export default function TrainerCoursesTab() {
                   cursor: "pointer",
                   transition: "transform 0.15s ease, border-color 0.15s ease",
                 }}
-                onClick={() => handleOpenModule(parentCourse.id, mod.id)}
+                onClick={() => handleOpenModule(parentCourse?.id || mod.course || null, mod.id)}
                 role="button"
                 tabIndex={0}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    handleOpenModule(parentCourse.id, mod.id);
+                    handleOpenModule(parentCourse?.id || mod.course || null, mod.id);
                   }
                 }}
               >
                 <div>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-                    <span className="badge badge-info" style={{ fontFamily: "var(--font-mono)" }}>
-                      {mod.code || `MOD-${mod.id}`}
-                    </span>
-                  </div>
                   <h3 style={{ fontSize: "16px", fontWeight: "600", color: "var(--text-main)", margin: 0 }}>
                     {mod.name}
                   </h3>
@@ -318,7 +333,7 @@ export default function TrainerCoursesTab() {
           }}
         >
           {activeLevels.map((lvl) => {
-            const assignedCount = modules.filter((m) => m.level === lvl.id).length;
+            const assignedCount = publishedModules.filter((m) => m.level === lvl.id).length;
 
             return (
               <div

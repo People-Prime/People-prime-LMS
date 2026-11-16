@@ -55,8 +55,7 @@ export default function CourseCurriculumView({
   const filteredModules = courseModules.filter((m) => {
     const matchesSearch =
       !moduleSearch.trim() ||
-      m.name.toLowerCase().includes(moduleSearch.toLowerCase()) ||
-      m.code.toLowerCase().includes(moduleSearch.toLowerCase());
+      m.name.toLowerCase().includes(moduleSearch.toLowerCase());
     const matchesStatus =
       moduleStatusFilter === "ALL" || m.status === moduleStatusFilter;
     const matchesLevel =
@@ -86,13 +85,25 @@ export default function CourseCurriculumView({
             <div>
               <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
                 <span className="badge badge-purple">Module #{activeModule.id}</span>
-                <span className="badge badge-info">{activeModule.code}</span>
                 {getStatusBadge(activeModule.status)}
               </div>
               <h3 style={{ margin: 0, fontSize: "18px" }}>{activeModule.name}</h3>
               <p style={{ margin: "4px 0 0 0", color: "var(--text-secondary)", fontSize: "13px" }}>
-                Course: <strong>{selectedCourse?.name || activeModule.course_name}</strong> | Duration:{" "}
-                {activeModule.estimated_duration_minutes} min
+                {selectedCourse?.name || activeModule.course_name ? (
+                  <>
+                    Course: <strong>{selectedCourse?.name || activeModule.course_name}</strong>
+                  </>
+                ) : (
+                  <>
+                    Level:{" "}
+                    <strong>
+                      {activeModule.level_name ||
+                        courseLevels.find((lvl) => lvl.id === activeModule.level)?.name ||
+                        "Independent Curriculum"}
+                    </strong>
+                  </>
+                )}{" "}
+                | Duration: {activeModule.estimated_duration_minutes} min
               </p>
             </div>
             <div style={{ display: "flex", gap: "8px" }}>
@@ -143,7 +154,7 @@ export default function CourseCurriculumView({
               onClick={() => setModuleSubTab("submodules")}
               style={{ fontSize: "12px", padding: "4px 10px" }}
             >
-              1. Lessons & Attached Materials ({activeSubmodules.length})
+              1. Training Content &amp; Materials ({activeSubmodules.length > 0 ? `${activeSubmodules.length} Lessons` : "Module Level"})
             </button>
             <button
               type="button"
@@ -166,12 +177,28 @@ export default function CourseCurriculumView({
               {moduleSubTab === "submodules" && (
                 <div>
                   {activeSubmodules.length === 0 ? (
-                    <p style={{ color: "var(--text-secondary)", padding: "16px", textAlign: "center" }}>
-                      No submodules created yet under this module. Click &quot;+ Add Submodule&quot; above to partition
-                      this module into lessons.
-                    </p>
+                    <div>
+                      {/* Direct Module-Level Attached Materials */}
+                      <LessonMaterialsPanel
+                        module={activeModule}
+                        mappings={mappings}
+                        onOpenAttachModal={() => onOpenAttachModal({ module: activeModule })}
+                        onMappingDeleted={onMappingDeleted}
+                      />
+                    </div>
                   ) : (
                     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                      {/* Optional Module-level materials header if any */}
+                      {mappings.some((m) => m.module === activeModule.id && !m.submodule) && (
+                        <div style={{ marginBottom: "8px" }}>
+                          <LessonMaterialsPanel
+                            module={activeModule}
+                            mappings={mappings}
+                            onOpenAttachModal={() => onOpenAttachModal({ module: activeModule })}
+                            onMappingDeleted={onMappingDeleted}
+                          />
+                        </div>
+                      )}
                       {activeSubmodules.map((sub) => (
                         <div
                           key={sub.id}
@@ -457,10 +484,7 @@ export default function CourseCurriculumView({
                     }}
                   >
                     <div>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-                        <span className="badge badge-purple" style={{ fontSize: "10px", fontFamily: "var(--font-mono)" }}>
-                          Tier #{lvl.order}
-                        </span>
+                      <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", marginBottom: "8px" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                           <span className={`badge ${assignedCount > 0 ? "badge-success" : "badge-secondary"}`} style={{ fontSize: "11px" }}>
                             {assignedCount} {assignedCount === 1 ? "Module" : "Modules"}
@@ -617,7 +641,6 @@ export default function CourseCurriculumView({
                     <tr>
                       <th>ID</th>
                       <th>Module Name</th>
-                      <th>Code</th>
                       <th>Level</th>
                       <th>Duration</th>
                       <th>Order</th>
@@ -626,19 +649,27 @@ export default function CourseCurriculumView({
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredModules.map((m) => (
+                    {filteredModules.map((m) => {
+                      const targetCourseId = selectedCourse?.id || m.course || null;
+                      const viewerUrl = targetCourseId
+                        ? `/learner/module-viewer?courseId=${targetCourseId}&moduleId=${m.id}`
+                        : `/learner/module-viewer?moduleId=${m.id}`;
+                      const readerUrl = targetCourseId
+                        ? `/learner/reader?courseId=${targetCourseId}&moduleId=${m.id}`
+                        : `/learner/reader?moduleId=${m.id}`;
+
+                      return (
                       <tr key={m.id}>
                         <td><code>#{m.id}</code></td>
                         <td>
                           <strong
                             style={{ cursor: "pointer", color: "var(--accent-primary, #6366f1)" }}
-                            onClick={() => window.open(`/learner/module-viewer?courseId=${selectedCourse?.id || m.course}&moduleId=${m.id}`, "_blank")}
+                            onClick={() => window.open(viewerUrl, "_blank")}
                             title="Open module in new browser tab"
                           >
                             {m.name}
                           </strong>
                         </td>
-                        <td><code>{m.code}</code></td>
                         <td>
                           <select
                             value={m.level || ""}
@@ -670,7 +701,7 @@ export default function CourseCurriculumView({
                             <button
                               type="button"
                               className="btn btn-secondary"
-                              onClick={() => window.open(`/learner/module-viewer?courseId=${selectedCourse?.id || m.course}&moduleId=${m.id}`, "_blank")}
+                              onClick={() => window.open(viewerUrl, "_blank")}
                               style={{ padding: "4px 8px", fontSize: "11px", whiteSpace: "nowrap" }}
                               title="Open module learning content in a new browser tab"
                             >
@@ -690,7 +721,7 @@ export default function CourseCurriculumView({
                                 {
                                   label: "Open in New Tab",
                                   icon: "↗",
-                                  onClick: () => window.open(`/learner/reader?courseId=${selectedCourse?.id || m.course}&moduleId=${m.id}`, "_blank"),
+                                  onClick: () => window.open(readerUrl, "_blank"),
                                   title: "Launch interactive module reader in a new browser tab",
                                 },
                                 {
@@ -730,7 +761,8 @@ export default function CourseCurriculumView({
                           </div>
                         </td>
                       </tr>
-                    ))}
+                    );
+                    })}
                   </tbody>
                 </table>
               </div>

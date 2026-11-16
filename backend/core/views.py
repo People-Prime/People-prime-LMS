@@ -74,9 +74,26 @@ def session_login(request):
             status=400,
         )
 
+    # Resolve email to username if input contains '@'
+    auth_username = username_clean
+    if "@" in username_clean:
+        matched_users = User.objects.filter(email__iexact=username_clean)
+        match_count = matched_users.count()
+        if match_count == 1:
+            auth_username = matched_users.first().username
+        elif match_count > 1:
+            # If multiple accounts share the same email, reject authentication safely
+            return JsonResponse(
+                {"error": "Invalid username or password."},
+                status=401,
+            )
+        else:
+            # No email found; allow authenticate() to fail normally without exposing account existence
+            auth_username = username_clean
+
     user = authenticate(
         request,
-        username=username_clean,
+        username=auth_username,
         password=password,
     )
 

@@ -26,7 +26,7 @@ from core.models import (
 class ModuleInline(admin.TabularInline):
     model = Module
     extra = 0
-    fields = ("name", "code", "order", "status", "estimated_duration_minutes")
+    fields = ("name", "order", "status", "estimated_duration_minutes")
     show_change_link = True
 
 
@@ -66,9 +66,9 @@ class CourseAdmin(admin.ModelAdmin):
 
 @admin.register(Module)
 class ModuleAdmin(admin.ModelAdmin):
-    list_display = ("name", "code", "course", "order", "estimated_duration_minutes", "status")
+    list_display = ("name", "course", "order", "estimated_duration_minutes", "status")
     list_filter = ("status", "course")
-    search_fields = ("name", "code", "course__name")
+    search_fields = ("name", "course__name")
     inlines = [SubmoduleInline, ModuleQuestionInline]
 
 

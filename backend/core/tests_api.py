@@ -20,6 +20,7 @@ from core.models import (
     AuditLog,
     CandidateType,
     Course,
+    CourseLevel,
     GroupMembership,
     LearnerGroup,
     Module,
@@ -55,10 +56,25 @@ def make_course(program=None, name="Course 1", code="C01", order=1,
     )
 
 
-def make_module(course, name="Module 1", code="M01", order=1,
-                status=PublicationStatus.DRAFT, created_by=None):
+def make_level(course=None, name="Level 1", order=1, description=""):
+    return CourseLevel.objects.create(
+        course=course, name=name, order=order, description=description
+    )
+
+
+def make_module(course, name="Module 1", order=1,
+                status=PublicationStatus.DRAFT, created_by=None, level=None):
+    if level is None:
+        if course:
+            existing_level = CourseLevel.objects.filter(course=course).first()
+            if existing_level:
+                level = existing_level
+            else:
+                level = CourseLevel.objects.create(course=course, name=f"Level for {course.code}", order=1)
+        else:
+            level = CourseLevel.objects.create(course=None, name=f"Level for {name}", order=1)
     return Module.objects.create(
-        course=course, name=name, code=code, order=order,
+        course=course, level=level, name=name, order=order,
         status=status, created_by=created_by,
     )
 
@@ -84,7 +100,7 @@ class CurriculumParentChildTest(APITestCase):
             name="Hier Course", code="HC01", created_by=self.admin
         )
         self.module = make_module(
-            self.course, name="Hier Module", code="HM01", created_by=self.admin
+            self.course, name="Hier Module", created_by=self.admin
         )
 
     def test_course_creation_succeeds(self):
@@ -96,10 +112,17 @@ class CurriculumParentChildTest(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["name"], "Standalone Course")
 
-        # Create module directly under this course
+        # Create level under this course, then module under this level
+        lvl_resp = self.client.post(
+            "/api/course-levels/",
+            {"course": response.data["id"], "name": "Direct Level", "order": 1},
+            format="json",
+        )
+        self.assertEqual(lvl_resp.status_code, status.HTTP_201_CREATED)
+
         mod_resp = self.client.post(
             "/api/modules/",
-            {"course": response.data["id"], "name": "Direct Module", "code": "DM01", "order": 1},
+            {"course": response.data["id"], "level": lvl_resp.data["id"], "name": "Direct Module", "order": 1},
             format="json",
         )
         self.assertEqual(mod_resp.status_code, status.HTTP_201_CREATED)
@@ -107,7 +130,7 @@ class CurriculumParentChildTest(APITestCase):
     def test_module_requires_valid_course(self):
         response = self.client.post(
             "/api/modules/",
-            {"course": 9999999, "name": "Bad Module", "code": "BM01", "order": 1},
+            {"course": 9999999, "name": "Bad Module", "order": 1},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
@@ -133,7 +156,7 @@ class CurriculumParentChildTest(APITestCase):
         # order=1 already exists for self.course
         response = self.client.post(
             "/api/modules/",
-            {"course": self.course.pk, "name": "Dup Module", "code": "DM99", "order": 1},
+            {"course": self.course.pk, "name": "Dup Module", "order": 1},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
@@ -167,16 +190,16 @@ class CurriculumScopingAndFilePathHardeningTest(APITestCase):
 
         # Curriculum A (Published)
         self.course_a = make_course(None, name="Course 22 A", code="C22A", status=PublicationStatus.PUBLISHED, created_by=self.admin)
-        self.module_a = make_module(self.course_a, name="Mod 22 A", code="M22A", status=PublicationStatus.PUBLISHED, created_by=self.admin)
+        self.module_a = make_module(self.course_a, name="Mod 22 A", status=PublicationStatus.PUBLISHED, created_by=self.admin)
         self.submod_a = make_submodule(self.module_a, name="Sub 22 A", status=PublicationStatus.PUBLISHED)
 
         # Draft item in Curriculum A
         self.course_a_draft = make_course(None, name="Course 22 A Draft", code="C22AD", order=2, status=PublicationStatus.DRAFT, created_by=self.admin)
-        self.module_a_draft = make_module(self.course_a_draft, name="Mod 22 AD", code="M22AD", status=PublicationStatus.DRAFT, created_by=self.admin)
+        self.module_a_draft = make_module(self.course_a_draft, name="Mod 22 AD", status=PublicationStatus.DRAFT, created_by=self.admin)
 
         # Curriculum B (Assigned to Group B only)
         self.course_b = make_course(None, name="Course 22 B", code="C22B", status=PublicationStatus.PUBLISHED, created_by=self.admin)
-        self.module_b = make_module(self.course_b, name="Mod 22 B", code="M22B", status=PublicationStatus.PUBLISHED, created_by=self.admin)
+        self.module_b = make_module(self.course_b, name="Mod 22 B", status=PublicationStatus.PUBLISHED, created_by=self.admin)
         self.submod_b = make_submodule(self.module_b, name="Sub 22 B", status=PublicationStatus.PUBLISHED)
 
         # Training Assignments
@@ -222,19 +245,29 @@ class CurriculumScopingAndFilePathHardeningTest(APITestCase):
         self.assertEqual(self.client.get(f"/api/courses/{self.course_a_draft.pk}/").status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(self.client.get(f"/api/modules/{self.module_a_draft.pk}/").status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_trainer_cannot_retrieve_curriculum_outside_assigned_group(self):
-        """Trainer A cannot retrieve Course B or its modules/submodules (returns 404)."""
+    def test_trainer_can_view_all_published_courses_regardless_of_group(self):
+        """Trainers can view all published courses and curriculum in read-only mode regardless of cohort assignment."""
         self.client.force_authenticate(user=self.trainer_a)
-        self.assertEqual(self.client.get(f"/api/courses/{self.course_b.pk}/").status_code, status.HTTP_404_NOT_FOUND)
-        self.assertEqual(self.client.get(f"/api/modules/{self.module_b.pk}/").status_code, status.HTTP_404_NOT_FOUND)
-        self.assertEqual(self.client.get(f"/api/submodules/{self.submod_b.pk}/").status_code, status.HTTP_404_NOT_FOUND)
+        # Published Course B is assigned to Group B only, but Trainer A can still retrieve and view it
+        self.assertEqual(self.client.get(f"/api/courses/{self.course_b.pk}/").status_code, status.HTTP_200_OK)
+        self.assertEqual(self.client.get(f"/api/modules/{self.module_b.pk}/").status_code, status.HTTP_200_OK)
+        self.assertEqual(self.client.get(f"/api/submodules/{self.submod_b.pk}/").status_code, status.HTTP_200_OK)
 
-    def test_trainer_can_retrieve_assigned_draft_and_published_curriculum(self):
-        """Trainer A can retrieve published and draft curriculum within their assigned group."""
+        # Appears in trainer's published courses list
+        courses_res = self.client.get("/api/courses/")
+        self.assertEqual(courses_res.status_code, status.HTTP_200_OK)
+        course_ids = [c["id"] for c in courses_res.data]
+        self.assertIn(self.course_a.pk, course_ids)
+        self.assertIn(self.course_b.pk, course_ids)
+
+    def test_trainer_can_retrieve_published_but_not_draft_curriculum(self):
+        """Trainers can retrieve published courses/modules, but cannot retrieve draft curriculum."""
         self.client.force_authenticate(user=self.trainer_a)
+        # Published course returns 200
         self.assertEqual(self.client.get(f"/api/courses/{self.course_a.pk}/").status_code, status.HTTP_200_OK)
-        self.assertEqual(self.client.get(f"/api/courses/{self.course_a_draft.pk}/").status_code, status.HTTP_200_OK)
-        self.assertEqual(self.client.get(f"/api/modules/{self.module_a_draft.pk}/").status_code, status.HTTP_200_OK)
+        # Draft course and draft module return 404
+        self.assertEqual(self.client.get(f"/api/courses/{self.course_a_draft.pk}/").status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.get(f"/api/modules/{self.module_a_draft.pk}/").status_code, status.HTTP_404_NOT_FOUND)
 
     def test_admin_retains_access_to_all_curriculum(self):
         """LMS Admin retains full access to all curriculum across all groups and statuses."""
@@ -726,19 +759,25 @@ class ModuleQuestionAndResponseAPITest(APITestCase):
         self.course = Course.objects.create(
             name="MQ Course", code="MQC01", status=PublicationStatus.PUBLISHED
         )
+        self.level_mq = CourseLevel.objects.create(
+            course=self.course, name="MQ Level 1", order=1
+        )
         self.module_a = Module.objects.create(
-            course=self.course, name="MQ Module A", code="MQM01", order=1, status=PublicationStatus.PUBLISHED
+            course=self.course, level=self.level_mq, name="MQ Module A", order=1, status=PublicationStatus.PUBLISHED
         )
         self.module_b = Module.objects.create(
-            course=self.course, name="MQ Module B", code="MQM02", order=2, status=PublicationStatus.PUBLISHED
+            course=self.course, level=self.level_mq, name="MQ Module B", order=2, status=PublicationStatus.PUBLISHED
         )
 
         # Unassigned Course/Module
         self.unassigned_course = Course.objects.create(
             name="Unassigned Course", code="UNAC01", status=PublicationStatus.PUBLISHED
         )
+        self.unassigned_level = CourseLevel.objects.create(
+            course=self.unassigned_course, name="Unassigned Level", order=1
+        )
         self.unassigned_module = Module.objects.create(
-            course=self.unassigned_course, name="Unassigned Module", code="UNAM01", order=1, status=PublicationStatus.PUBLISHED
+            course=self.unassigned_course, level=self.unassigned_level, name="Unassigned Module", order=1, status=PublicationStatus.PUBLISHED
         )
 
         # Candidate Types and Learner Groups
@@ -1644,6 +1683,119 @@ class ModuleQuestionAndResponseAPITest(APITestCase):
         self.assertEqual(res_comp.status_code, status.HTTP_200_OK)
         self.assertTrue(res_comp.data["is_completed"])
 
+    def test_assessment_status_and_completion_rules(self):
+        """
+        Covers the 10 assessment status and module completion scenarios:
+        1. Learner answers all 5 questions and scores 0/5 -> module remains NOT COMPLETED.
+        2. Learner scores 2/5 -> module remains NOT COMPLETED.
+        3. Learner scores exactly 3/5 -> module becomes COMPLETED.
+        4. Learner scores 4/5 or 5/5 -> module becomes COMPLETED.
+        5. Failed learner can start another attempt.
+        6. Failed retake does not overwrite an earlier passing result.
+        7. Responses saved in current attempt display Answered status.
+        8. Responses from previous attempts do not appear as current-attempt answers.
+        9. Passing learner has retakes locked.
+        10. Overview & progress reports reflect the accurate pass/fail module status.
+        """
+        # Create Course with a 5-question Assessment Module
+        course = Course.objects.create(name="PassFail Course", code="PF_CRS", status=PublicationStatus.PUBLISHED)
+        level_pf = CourseLevel.objects.create(course=course, name="PassFail Level 1", order=1)
+        module = Module.objects.create(course=course, level=level_pf, name="Assessment Module", order=1, status=PublicationStatus.PUBLISHED)
+        TrainingAssignment.objects.create(course=course, learner_group=self.group_a, is_active=True)
+
+        questions = []
+        for i in range(1, 6):
+            q = ModuleQuestion.objects.create(
+                module=module,
+                question_text=f"Question {i}?",
+                question_type="MULTIPLE_CHOICE",
+                options=[
+                    {"id": "opt_correct", "text": "Correct Option", "is_correct": True},
+                    {"id": "opt_wrong", "text": "Wrong Option", "is_correct": False},
+                    {"id": "opt_other", "text": "Other Option", "is_correct": False},
+                ],
+                order=i,
+                is_required=True,
+                is_active=True,
+            )
+            questions.append(q)
+
+        self.client.force_authenticate(user=self.learner_a)
+
+        # Scenario 1: Learner answers all 5 questions with wrong answers -> 0/5
+        for q in questions:
+            self.client.post("/api/question-responses/", {"question": q.pk, "selected_option_id": "opt_wrong"}, format="json")
+
+        status_0 = self.client.get(f"/api/question-responses/module-completion-status/?module={module.pk}")
+        self.assertEqual(status_0.status_code, status.HTTP_200_OK)
+        self.assertFalse(status_0.data["is_module_completed"])
+        self.assertFalse(status_0.data["has_passed"])
+        self.assertEqual(status_0.data["result"], "FAIL")
+        self.assertEqual(status_0.data["marks_obtained"], 0)
+
+        # Scenario 5: Failed learner can start another attempt
+        self.assertTrue(status_0.data["can_retake"])
+        retake_res = self.client.post("/api/question-responses/start-retake/", {"module": module.pk}, format="json")
+        self.assertEqual(retake_res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(retake_res.data["attempt_number"], 2)
+
+        # Scenario 2: Learner scores 2/5 (answers Q1 and Q2 correctly, Q3-Q5 incorrectly)
+        for i, q in enumerate(questions):
+            opt = "opt_correct" if i < 2 else "opt_wrong"
+            self.client.post("/api/question-responses/", {"question": q.pk, "selected_option_id": opt}, format="json")
+
+        status_2 = self.client.get(f"/api/question-responses/module-completion-status/?module={module.pk}")
+        self.assertFalse(status_2.data["is_module_completed"])
+        self.assertFalse(status_2.data["has_passed"])
+        self.assertEqual(status_2.data["result"], "FAIL")
+        self.assertEqual(status_2.data["marks_obtained"], 2)
+
+        # Scenario 3: Start Attempt 3 and score exactly 3/5 -> COMPLETED
+        retake_res3 = self.client.post("/api/question-responses/start-retake/", {"module": module.pk}, format="json")
+        self.assertEqual(retake_res3.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(retake_res3.data["attempt_number"], 3)
+
+        for i, q in enumerate(questions):
+            opt = "opt_correct" if i < 3 else "opt_wrong"
+            self.client.post("/api/question-responses/", {"question": q.pk, "selected_option_id": opt}, format="json")
+
+        status_3 = self.client.get(f"/api/question-responses/module-completion-status/?module={module.pk}")
+        self.assertTrue(status_3.data["is_module_completed"])
+        self.assertTrue(status_3.data["has_passed"])
+        self.assertEqual(status_3.data["result"], "PASS")
+        self.assertEqual(status_3.data["marks_obtained"], 3)
+
+        # Scenario 9: Passing learner has retakes locked
+        self.assertFalse(status_3.data["can_retake"])
+        retake_locked = self.client.post("/api/question-responses/start-retake/", {"module": module.pk}, format="json")
+        self.assertEqual(retake_locked.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("already passed", retake_locked.data["error"].lower())
+
+        # Scenario 6: Test that even if an attempt had lower score, best passing score preserves completion
+        # Simulate an attempt record with lower score (e.g. attempt 4 with score 1.0)
+        ModuleAssessmentAttempt.objects.create(
+            module=module,
+            learner=self.learner_a,
+            attempt_number=4,
+            score=1.0,
+            total_possible=5.0,
+            percentage=20.0,
+            is_completed=True,
+        )
+        status_preserved = self.client.get(f"/api/question-responses/module-completion-status/?module={module.pk}")
+        self.assertTrue(status_preserved.data["is_module_completed"])
+        self.assertTrue(status_preserved.data["has_passed"])
+        self.assertEqual(status_preserved.data["result"], "PASS")
+
+        # Scenario 10: Reports overview reflects COMPLETED
+        rep_res = self.client.get("/api/reports/overview/")
+        self.assertEqual(rep_res.status_code, status.HTTP_200_OK)
+        # Learner A course progress includes this completed assessment
+        learner_rec = next((l for l in rep_res.data["learners_progress"] if l["learner_id"] == self.learner_a.id and l["course_id"] == course.id), None)
+        self.assertIsNotNone(learner_rec)
+        self.assertEqual(learner_rec["completed_modules"], 1)
+        self.assertEqual(learner_rec["enrollment_status"], "COMPLETED")
+
 
 class TrainerProgressMonitoringAPITest(APITestCase):
     """
@@ -1671,9 +1823,10 @@ class TrainerProgressMonitoringAPITest(APITestCase):
 
         # Curriculum (All Published)
         self.course = Course.objects.create(name="TPM Course", code="TPMC01", status=PublicationStatus.PUBLISHED)
-        self.mod1 = Module.objects.create(course=self.course, name="TPM Mod 1", code="TPMM01", order=1, status=PublicationStatus.PUBLISHED)
-        self.mod2 = Module.objects.create(course=self.course, name="TPM Mod 2", code="TPMM02", order=2, status=PublicationStatus.PUBLISHED)
-        self.mod_zero_q = Module.objects.create(course=self.course, name="TPM Zero Q Mod", code="TPMM03", order=3, status=PublicationStatus.PUBLISHED)
+        self.level_tpm = CourseLevel.objects.create(course=self.course, name="TPM Level 1", order=1)
+        self.mod1 = Module.objects.create(course=self.course, level=self.level_tpm, name="TPM Mod 1", order=1, status=PublicationStatus.PUBLISHED)
+        self.mod2 = Module.objects.create(course=self.course, level=self.level_tpm, name="TPM Mod 2", order=2, status=PublicationStatus.PUBLISHED)
+        self.mod_zero_q = Module.objects.create(course=self.course, level=self.level_tpm, name="TPM Zero Q Mod", order=3, status=PublicationStatus.PUBLISHED)
 
         # Candidate types & groups
         self.cand_type = CandidateType.objects.create(name="TPM Candidates", code="TPMCAND")
@@ -1948,17 +2101,22 @@ class AdminOversightAPITest(APITestCase):
             code="S36_CRS",
             status=PublicationStatus.PUBLISHED,
         )
+        self.level_s36 = CourseLevel.objects.create(
+            course=self.course,
+            name="Step36 Level 1",
+            order=1,
+        )
         self.mod1 = Module.objects.create(
             course=self.course,
+            level=self.level_s36,
             name="Step36 Module 1",
-            code="S36_MOD1",
             order=1,
             status=PublicationStatus.PUBLISHED,
         )
         self.mod2 = Module.objects.create(
             course=self.course,
+            level=self.level_s36,
             name="Step36 Module 2",
-            code="S36_MOD2",
             order=2,
             status=PublicationStatus.PUBLISHED,
         )
@@ -3192,7 +3350,8 @@ class AdminLearnerManagementAPITest(APITestCase):
     def test_delete_learner_with_responses_rejected(self):
         """Deleting a learner with question responses fails with 400 to prevent data loss."""
         course = Course.objects.create(name="Course", code="C1")
-        module = Module.objects.create(name="Mod", code="M1", course=course)
+        level = CourseLevel.objects.create(course=course, name="Level 1", order=1)
+        module = Module.objects.create(name="Mod", course=course, level=level)
         q = ModuleQuestion.objects.create(module=module, question_text="Is it done?", is_required=True)
         ModuleQuestionResponse.objects.create(question=q, learner=self.learner_active, response_value=True)
 
@@ -3251,8 +3410,9 @@ class IndividualTrainingAssignmentAPITest(APITestCase):
         self.standalone_course = make_course(None, name="Django Deep Dive", code="DDD01", status=PublicationStatus.PUBLISHED, created_by=self.admin)
 
         # Standalone course with 2 modules
-        self.mod_intro = Module.objects.create(name="Intro Module", code="MOD-INTRO", course=self.standalone_course, order=1, status=PublicationStatus.PUBLISHED)
-        self.mod_advanced = Module.objects.create(name="Advanced Module", code="MOD-ADV", course=self.standalone_course, order=2, status=PublicationStatus.PUBLISHED)
+        self.level_standalone = CourseLevel.objects.create(course=self.standalone_course, name="Deep Dive Level 1", order=1)
+        self.mod_intro = Module.objects.create(name="Intro Module", course=self.standalone_course, level=self.level_standalone, order=1, status=PublicationStatus.PUBLISHED)
+        self.mod_advanced = Module.objects.create(name="Advanced Module", course=self.standalone_course, level=self.level_standalone, order=2, status=PublicationStatus.PUBLISHED)
 
         # Question on mod_intro
         self.q_intro = ModuleQuestion.objects.create(
@@ -3431,8 +3591,8 @@ class ModuleFeedbackAPITest(APITestCase):
 
         # Course, Module
         self.course = make_course(None, name="Feedback Course", code="FBC01", status=PublicationStatus.PUBLISHED, created_by=self.admin)
-        self.module = make_module(self.course, name="Feedback Module 1", code="FBM01", order=1, status=PublicationStatus.PUBLISHED, created_by=self.admin)
-        self.module_zero_q = make_module(self.course, name="Module Zero Questions", code="FBM02", order=2, status=PublicationStatus.PUBLISHED, created_by=self.admin)
+        self.module = make_module(self.course, name="Feedback Module 1", order=1, status=PublicationStatus.PUBLISHED, created_by=self.admin)
+        self.module_zero_q = make_module(self.course, name="Module Zero Questions", order=2, status=PublicationStatus.PUBLISHED, created_by=self.admin)
 
         # Questions for module 1: 1 required, 1 optional
         self.q_required = ModuleQuestion.objects.create(
@@ -4276,11 +4436,11 @@ class ReportsAPITest(APITestCase):
 
         # Curriculum: Course 1 (2 modules) and Course 2 (1 module)
         self.course_1 = make_course(None, name="Report Course Python", code="RCP01", status=PublicationStatus.PUBLISHED, created_by=self.admin)
-        self.mod_1_1 = make_module(self.course_1, name="Python Basics", code="RCM01", order=1, status=PublicationStatus.PUBLISHED, created_by=self.admin)
-        self.mod_1_2 = make_module(self.course_1, name="Python Functions", code="RCM02", order=2, status=PublicationStatus.PUBLISHED, created_by=self.admin)
+        self.mod_1_1 = make_module(self.course_1, name="Python Basics", order=1, status=PublicationStatus.PUBLISHED, created_by=self.admin)
+        self.mod_1_2 = make_module(self.course_1, name="Python Functions", order=2, status=PublicationStatus.PUBLISHED, created_by=self.admin)
 
         self.course_2 = make_course(None, name="Report Course SQL", code="RCS01", status=PublicationStatus.PUBLISHED, created_by=self.admin)
-        self.mod_2_1 = make_module(self.course_2, name="SQL Queries", code="RCM03", order=1, status=PublicationStatus.PUBLISHED, created_by=self.admin)
+        self.mod_2_1 = make_module(self.course_2, name="SQL Queries", order=1, status=PublicationStatus.PUBLISHED, created_by=self.admin)
 
         # Questions
         self.q_1_1 = ModuleQuestion.objects.create(

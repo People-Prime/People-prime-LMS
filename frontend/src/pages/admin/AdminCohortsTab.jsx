@@ -41,11 +41,17 @@ export default function AdminCohortsTab() {
   const [groupCandType, setGroupCandType] = useState("");
   const [groupDesc, setGroupDesc] = useState("");
 
+  // Selected Group Details Modal State
+  const [selectedGroupForDetails, setSelectedGroupForDetails] = useState(null);
+
   // Create Candidate Type Modal
   const [showCreateCandType, setShowCreateCandType] = useState(false);
   const [candTypeName, setCandTypeName] = useState("");
   const [candTypeCode, setCandTypeCode] = useState("");
   const [candTypeDesc, setCandTypeDesc] = useState("");
+
+  // Selected Candidate Type Details Modal State
+  const [selectedCandTypeForDetails, setSelectedCandTypeForDetails] = useState(null);
 
   // Manual Assignment ID inputs (due to lack of user population endpoint)
   const [showAddMember, setShowAddMember] = useState(false);
@@ -58,11 +64,12 @@ export default function AdminCohortsTab() {
 
   // Create Training Assignment Modal state
   const [showCreateTrainingModal, setShowCreateTrainingModal] = useState(false);
-  const [curriculumList, setCurriculumList] = useState({ courses: [], modules: [] });
+  const [curriculumList, setCurriculumList] = useState({ courses: [], levels: [], modules: [] });
   const [curriculumLoading, setCurriculumLoading] = useState(false);
-  const [targetType, setTargetType] = useState("COURSE"); // 'COURSE' | 'MODULE'
+  const [targetType, setTargetType] = useState("LEVEL"); // 'COURSE' | 'LEVEL' | 'MODULE'
   const [recipientType, setRecipientType] = useState("GROUP"); // 'GROUP' | 'CANDIDATE_TYPE' | 'LEARNER'
   const [selectedCourseId, setSelectedCourseId] = useState("");
+  const [selectedLevelId, setSelectedLevelId] = useState("");
   const [selectedModuleId, setSelectedModuleId] = useState("");
   const [selectedGroupId, setSelectedGroupId] = useState("");
   const [selectedCandTypeId, setSelectedCandTypeId] = useState("");
@@ -459,13 +466,19 @@ export default function AdminCohortsTab() {
   const fetchCurriculumForAssignment = async () => {
     setCurriculumLoading(true);
     try {
-      const [crsRes, modRes] = await Promise.allSettled([
+      const [crsRes, lvlRes, modRes] = await Promise.allSettled([
         apiClient("/courses/"),
+        apiClient("/course-levels/"),
         apiClient("/modules/"),
       ]);
       const courses = crsRes.status === "fulfilled" ? (Array.isArray(crsRes.value) ? crsRes.value : crsRes.value?.results || []) : [];
+      const rawLevels = lvlRes.status === "fulfilled" ? (Array.isArray(lvlRes.value) ? lvlRes.value : lvlRes.value?.results || []) : [];
+      const levels = [...rawLevels].sort((a, b) => (a.order || 0) - (b.order || 0));
       const modules = modRes.status === "fulfilled" ? (Array.isArray(modRes.value) ? modRes.value : modRes.value?.results || []) : [];
-      setCurriculumList({ courses, modules });
+      setCurriculumList({ courses, levels, modules });
+      if (levels.length > 0) {
+        setSelectedLevelId((prev) => prev || String(levels[0].id));
+      }
     } catch {
       // ignore
     } finally {
@@ -474,9 +487,11 @@ export default function AdminCohortsTab() {
   };
 
   const handleOpenCreateTrainingModal = () => {
-    setTargetType("COURSE");
+    const sortedLevels = [...(curriculumList.levels || [])].sort((a, b) => (a.order || 0) - (b.order || 0));
+    setTargetType("LEVEL");
     setRecipientType("GROUP");
     setSelectedCourseId("");
+    setSelectedLevelId(sortedLevels.length > 0 ? String(sortedLevels[0].id) : "");
     setSelectedModuleId("");
     setSelectedGroupId(groups.length > 0 ? String(groups[0].id) : "");
     setSelectedCandTypeId(candidateTypes.length > 0 ? String(candidateTypes[0].id) : "");
@@ -496,8 +511,12 @@ export default function AdminCohortsTab() {
       setTrainingAssignError("Please select a Course.");
       return;
     }
+    if (targetType === "LEVEL" && !selectedLevelId) {
+      setTrainingAssignError("Please select a Course Level.");
+      return;
+    }
     if (targetType === "MODULE" && !selectedModuleId) {
-      setTrainingAssignError("Please select both a Course and a Module.");
+      setTrainingAssignError("Please select a Module.");
       return;
     }
 
@@ -517,6 +536,7 @@ export default function AdminCohortsTab() {
 
     const payload = {
       course: targetType === "COURSE" ? parseInt(selectedCourseId, 10) : null,
+      level: targetType === "LEVEL" ? parseInt(selectedLevelId, 10) : null,
       module: targetType === "MODULE" ? parseInt(selectedModuleId, 10) : null,
       learner_group: recipientType === "GROUP" ? parseInt(selectedGroupId, 10) : null,
       candidate_type: recipientType === "CANDIDATE_TYPE" ? parseInt(selectedCandTypeId, 10) : null,
@@ -719,16 +739,14 @@ export default function AdminCohortsTab() {
               </button>
             </>
           )}
-          {subTab === "training" && (
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={handleOpenCreateTrainingModal}
-              style={{ padding: "6px 14px", fontSize: "13px" }}
-            >
-              + Create Training Assignment
-            </button>
-          )}
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={handleOpenCreateTrainingModal}
+            style={{ padding: "6px 14px", fontSize: "13px" }}
+          >
+            + Assign Training Curriculum
+          </button>
           <button
             type="button"
             className="btn btn-secondary"
@@ -834,7 +852,26 @@ export default function AdminCohortsTab() {
                       {groups.map((g) => (
                         <tr key={g.id}>
                           <td><code>#{g.id}</code></td>
-                          <td><strong>{g.name}</strong></td>
+                          <td>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedGroupForDetails(g)}
+                              style={{
+                                background: "none",
+                                border: "none",
+                                padding: 0,
+                                font: "inherit",
+                                cursor: "pointer",
+                                color: "var(--accent-primary, #6366f1)",
+                                textDecoration: "underline",
+                                textAlign: "left",
+                                fontWeight: "600",
+                              }}
+                              title={`Click to view learners in ${g.name}`}
+                            >
+                              {g.name}
+                            </button>
+                          </td>
                           <td><code>{g.code}</code></td>
                           <td>{g.candidate_type_name || "—"}</td>
                           <td><span className="badge badge-info">{g.learners_count ?? 0}</span></td>
@@ -890,7 +927,26 @@ export default function AdminCohortsTab() {
                       {candidateTypes.map((ct) => (
                         <tr key={ct.id}>
                           <td><code>#{ct.id}</code></td>
-                          <td><strong>{ct.name}</strong></td>
+                          <td>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedCandTypeForDetails(ct)}
+                              style={{
+                                background: "none",
+                                border: "none",
+                                padding: 0,
+                                font: "inherit",
+                                cursor: "pointer",
+                                color: "var(--accent-primary, #6366f1)",
+                                textDecoration: "underline",
+                                textAlign: "left",
+                                fontWeight: "600",
+                              }}
+                              title={`Click to view learners in ${ct.name}`}
+                            >
+                              {ct.name}
+                            </button>
+                          </td>
                           <td><code>{ct.code}</code></td>
                           <td style={{ fontSize: "13px" }}>{ct.description || "—"}</td>
                           <td>
@@ -1271,6 +1327,13 @@ export default function AdminCohortsTab() {
                               <span>
                                 <span className="badge badge-success" style={{ marginRight: "6px" }}>Module</span>
                                 <strong>{tra.module_name}</strong>
+                                {tra.level_name && <small style={{ color: "var(--text-secondary)", display: "block" }}>Level: {tra.level_name}</small>}
+                                {tra.course_name && <small style={{ color: "var(--text-secondary)", display: "block" }}>Course: {tra.course_name}</small>}
+                              </span>
+                            ) : tra.level_name ? (
+                              <span>
+                                <span className="badge badge-purple" style={{ marginRight: "6px" }}>Level</span>
+                                <strong>{tra.level_name}</strong>
                                 {tra.course_name && <small style={{ color: "var(--text-secondary)", display: "block" }}>Course: {tra.course_name}</small>}
                               </span>
                             ) : tra.course_name ? (
@@ -1898,10 +1961,32 @@ export default function AdminCohortsTab() {
                       checked={targetType === "COURSE"}
                       onChange={() => {
                         setTargetType("COURSE");
+                        setSelectedLevelId("");
                         setSelectedModuleId("");
                       }}
                     />
                     Course
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontSize: "13px" }}>
+                    <input
+                      type="radio"
+                      name="targetType"
+                      value="LEVEL"
+                      checked={targetType === "LEVEL"}
+                      onChange={() => {
+                        setTargetType("LEVEL");
+                        setSelectedCourseId("");
+                        setSelectedModuleId("");
+                        setSelectedLevelId((prev) => {
+                          if (prev) return prev;
+                          const sorted = [...(curriculumList.levels || [])].sort(
+                            (a, b) => (a.order || 0) - (b.order || 0)
+                          );
+                          return sorted.length > 0 ? String(sorted[0].id) : "";
+                        });
+                      }}
+                    />
+                    Course Level
                   </label>
                   <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontSize: "13px" }}>
                     <input
@@ -1912,6 +1997,7 @@ export default function AdminCohortsTab() {
                       onChange={() => {
                         setTargetType("MODULE");
                         setSelectedCourseId("");
+                        setSelectedLevelId("");
                         setSelectedModuleId("");
                       }}
                     />
@@ -1941,52 +2027,103 @@ export default function AdminCohortsTab() {
                 </div>
               )}
 
+              {targetType === "LEVEL" && (
+                <div className="form-group">
+                  <label className="form-label" htmlFor="assignLevel">Select Course Level *</label>
+                  <select
+                    id="assignLevel"
+                    className="form-input"
+                    value={selectedLevelId}
+                    onChange={(e) => setSelectedLevelId(e.target.value)}
+                    required
+                    disabled={curriculumLoading}
+                  >
+                    <option value="">-- Choose Course Level --</option>
+                    {(curriculumList.levels || []).map((lvl) => (
+                      <option key={lvl.id} value={lvl.id}>
+                        {lvl.name} (Tier #{lvl.order}){lvl.course_name ? ` — ${lvl.course_name}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               {targetType === "MODULE" && (
                 <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                  <div className="form-group">
-                    <label className="form-label" htmlFor="assignModCourse">Step A: Select Course *</label>
-                    <select
-                      id="assignModCourse"
-                      className="form-input"
-                      value={selectedCourseId}
-                      onChange={(e) => {
-                        setSelectedCourseId(e.target.value);
-                        setSelectedModuleId("");
-                      }}
-                      required
-                      disabled={curriculumLoading}
-                    >
-                      <option value="">-- Choose Course --</option>
-                      {curriculumList.courses.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name} ({c.code})
-                        </option>
-                      ))}
-                    </select>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                    <div className="form-group" style={{ marginBottom: 0 }}>
+                      <label className="form-label" htmlFor="assignModLevel">Filter by Level (Optional)</label>
+                      <select
+                        id="assignModLevel"
+                        className="form-input"
+                        value={selectedLevelId}
+                        onChange={(e) => {
+                          setSelectedLevelId(e.target.value);
+                          setSelectedModuleId("");
+                        }}
+                        disabled={curriculumLoading}
+                      >
+                        <option value="">-- All Levels --</option>
+                        {(curriculumList.levels || []).map((lvl) => (
+                          <option key={lvl.id} value={lvl.id}>
+                            {lvl.name} (Tier #{lvl.order})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="form-group" style={{ marginBottom: 0 }}>
+                      <label className="form-label" htmlFor="assignModCourse">Filter by Course (Optional)</label>
+                      <select
+                        id="assignModCourse"
+                        className="form-input"
+                        value={selectedCourseId}
+                        onChange={(e) => {
+                          setSelectedCourseId(e.target.value);
+                          setSelectedModuleId("");
+                        }}
+                        disabled={curriculumLoading}
+                      >
+                        <option value="">-- All / Independent Modules --</option>
+                        {curriculumList.courses.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name} ({c.code})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
 
                   <div className="form-group">
-                    <label className="form-label" htmlFor="assignMod">Step B: Select Module *</label>
+                    <label className="form-label" htmlFor="assignMod">Select Module *</label>
                     <select
                       id="assignMod"
                       className="form-input"
                       value={selectedModuleId}
                       onChange={(e) => setSelectedModuleId(e.target.value)}
                       required
-                      disabled={!selectedCourseId || curriculumLoading}
+                      disabled={curriculumLoading}
                     >
-                      <option value="">{selectedCourseId ? "-- Choose Module --" : "-- Select a Course First --"}</option>
+                      <option value="">-- Choose Module --</option>
                       {curriculumList.modules
-                        .filter((m) => String(m.course) === String(selectedCourseId))
+                        .filter((m) => {
+                          if (selectedLevelId && String(m.level) !== String(selectedLevelId)) return false;
+                          if (selectedCourseId && String(m.course) !== String(selectedCourseId)) return false;
+                          return true;
+                        })
                         .map((m) => (
                           <option key={m.id} value={m.id}>
-                            {m.name} (Order: {m.order}) [{m.status}]
+                            {m.name} (Order: {m.order}){m.level_name ? ` [${m.level_name}]` : ""} [{m.status}]
                           </option>
                         ))}
                     </select>
-                    {selectedCourseId && curriculumList.modules.filter((m) => String(m.course) === String(selectedCourseId)).length === 0 && (
+                    {curriculumList.modules.filter((m) => {
+                      if (selectedLevelId && String(m.level) !== String(selectedLevelId)) return false;
+                      if (selectedCourseId && String(m.course) !== String(selectedCourseId)) return false;
+                      return true;
+                    }).length === 0 && (
                       <small style={{ color: "var(--status-warning, #f59e0b)", fontSize: "11px", marginTop: "4px", display: "block" }}>
-                        No modules found for this course. Please create a module first.
+                        No modules found matching the selected filters.
                       </small>
                     )}
                   </div>
@@ -2146,6 +2283,7 @@ export default function AdminCohortsTab() {
                   disabled={
                     submitting ||
                     (targetType === "COURSE" && !selectedCourseId) ||
+                    (targetType === "LEVEL" && !selectedLevelId) ||
                     (targetType === "MODULE" && !selectedModuleId) ||
                     (recipientType === "GROUP" && !selectedGroupId) ||
                     (recipientType === "CANDIDATE_TYPE" && !selectedCandTypeId) ||
@@ -2156,6 +2294,395 @@ export default function AdminCohortsTab() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Group Learner Details Modal */}
+      {selectedGroupForDetails && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="group-learners-modal-title"
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "rgba(0, 0, 0, 0.75)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+            padding: "20px",
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setSelectedGroupForDetails(null);
+          }}
+        >
+          <div
+            className="card"
+            style={{
+              width: "100%",
+              maxWidth: "800px",
+              maxHeight: "90vh",
+              display: "flex",
+              flexDirection: "column",
+              padding: 0,
+              overflow: "hidden",
+              border: "1px solid var(--border-color)",
+              boxShadow: "var(--shadow-lg)",
+            }}
+          >
+            {/* Modal Header */}
+            <div
+              style={{
+                padding: "20px 24px",
+                borderBottom: "1px solid var(--border-color)",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                backgroundColor: "var(--bg-card)",
+              }}
+            >
+              <div>
+                <h3 id="group-learners-modal-title" style={{ margin: 0, fontSize: "17px", fontWeight: "600", display: "flex", alignItems: "center", gap: "10px" }}>
+                  <span>{selectedGroupForDetails.name}</span>
+                  <span className="badge badge-purple">
+                    {(() => {
+                      const groupMembers = memberships.filter((m) => m.group === selectedGroupForDetails.id && m.is_active !== false);
+                      return `${groupMembers.length} ${groupMembers.length === 1 ? "Learner" : "Learners"}`;
+                    })()}
+                  </span>
+                </h3>
+                <p style={{ margin: "4px 0 0", color: "var(--text-secondary)", fontSize: "13px" }}>
+                  Code: <code>{selectedGroupForDetails.code}</code> &bull; Candidate Type: <strong>{selectedGroupForDetails.candidate_type_name || "—"}</strong>
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setSelectedGroupForDetails(null)}
+                style={{ padding: "6px 12px", fontSize: "16px", lineHeight: 1 }}
+                aria-label="Close dialog"
+              >
+                &times;
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div style={{ padding: "20px 24px", overflowY: "auto", flex: 1 }}>
+              {(() => {
+                // Find all active memberships for this group
+                const groupMembers = memberships.filter((m) => m.group === selectedGroupForDetails.id && m.is_active !== false);
+
+                // Dedup learners by learner ID
+                const seenLearnerIds = new Set();
+                const uniqueGroupLearners = [];
+
+                groupMembers.forEach((m) => {
+                  if (seenLearnerIds.has(m.learner)) return;
+                  seenLearnerIds.add(m.learner);
+
+                  const learnerObj = learners.find((l) => l.id === m.learner);
+                  const fullName = learnerObj
+                    ? [learnerObj.first_name, learnerObj.last_name].filter(Boolean).join(" ")
+                    : "";
+                  const displayName = fullName || learnerObj?.username || m.learner_username || `Learner #${m.learner}`;
+                  const email = learnerObj?.email || "—";
+                  const candidateType = selectedGroupForDetails.candidate_type_name || "—";
+                  const isActive = learnerObj?.is_active ?? m.is_active ?? true;
+
+                  uniqueGroupLearners.push({
+                    id: m.learner,
+                    displayName,
+                    username: learnerObj?.username || m.learner_username,
+                    email,
+                    candidateType,
+                    isActive,
+                    joinedAt: m.joined_at,
+                  });
+                });
+
+                if (uniqueGroupLearners.length === 0) {
+                  return (
+                    <div style={{ textAlign: "center", padding: "48px 16px", color: "var(--text-secondary)" }}>
+                      <p style={{ margin: 0, fontSize: "14px" }}>
+                        No learners are currently assigned to this group.
+                      </p>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="table-container" style={{ border: "1px solid var(--border-color)", borderRadius: "var(--radius-sm)" }}>
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th style={{ width: "60px" }}>S.No.</th>
+                          <th>Learner Name</th>
+                          <th>Email Address</th>
+                          <th>Candidate Type</th>
+                          <th>Account Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {uniqueGroupLearners.map((lrn, index) => (
+                          <tr key={lrn.id}>
+                            <td style={{ color: "var(--text-secondary)" }}>{index + 1}</td>
+                            <td>
+                              <strong style={{ color: "var(--text-main)" }}>{lrn.displayName}</strong>
+                              {lrn.username && lrn.username !== lrn.displayName && (
+                                <div style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
+                                  @{lrn.username}
+                                </div>
+                              )}
+                            </td>
+                            <td style={{ color: "var(--text-secondary)", fontSize: "13px" }}>
+                              {lrn.email}
+                            </td>
+                            <td>
+                              <span className="badge badge-info">{lrn.candidateType}</span>
+                            </td>
+                            <td>
+                              <span className={`badge ${lrn.isActive ? "badge-success" : "badge-warning"}`}>
+                                {lrn.isActive ? "Active" : "Inactive"}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Modal Footer */}
+            <div
+              style={{
+                padding: "14px 24px",
+                borderTop: "1px solid var(--border-color)",
+                display: "flex",
+                justifyContent: "flex-end",
+                backgroundColor: "var(--bg-card)",
+              }}
+            >
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setSelectedGroupForDetails(null)}
+                style={{ padding: "6px 14px", fontSize: "13px" }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Candidate Type Learner Details Modal */}
+      {selectedCandTypeForDetails && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="cand-type-learners-modal-title"
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "rgba(0, 0, 0, 0.75)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+            padding: "20px",
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setSelectedCandTypeForDetails(null);
+          }}
+        >
+          <div
+            className="card"
+            style={{
+              width: "100%",
+              maxWidth: "800px",
+              maxHeight: "90vh",
+              display: "flex",
+              flexDirection: "column",
+              padding: 0,
+              overflow: "hidden",
+              border: "1px solid var(--border-color)",
+              boxShadow: "var(--shadow-lg)",
+            }}
+          >
+            {/* Modal Header */}
+            <div
+              style={{
+                padding: "20px 24px",
+                borderBottom: "1px solid var(--border-color)",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                backgroundColor: "var(--bg-card)",
+              }}
+            >
+              <div>
+                <h3 id="cand-type-learners-modal-title" style={{ margin: 0, fontSize: "17px", fontWeight: "600", display: "flex", alignItems: "center", gap: "10px" }}>
+                  <span>{selectedCandTypeForDetails.name}</span>
+                  <span className="badge badge-purple">
+                    {(() => {
+                      // Match groups belonging to this candidate type
+                      const matchingGroupIds = new Set(
+                        groups
+                          .filter((g) => g.candidate_type === selectedCandTypeForDetails.id)
+                          .map((g) => g.id)
+                      );
+                      const matchingLearnerIds = new Set(
+                        memberships
+                          .filter((m) => matchingGroupIds.has(m.group) && m.is_active !== false)
+                          .map((m) => m.learner)
+                      );
+                      return `${matchingLearnerIds.size} ${matchingLearnerIds.size === 1 ? "Learner" : "Learners"}`;
+                    })()}
+                  </span>
+                </h3>
+                <p style={{ margin: "4px 0 0", color: "var(--text-secondary)", fontSize: "13px" }}>
+                  Code: <code>{selectedCandTypeForDetails.code}</code>
+                  {selectedCandTypeForDetails.description ? ` • ${selectedCandTypeForDetails.description}` : ""}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setSelectedCandTypeForDetails(null)}
+                style={{ padding: "6px 12px", fontSize: "16px", lineHeight: 1 }}
+                aria-label="Close dialog"
+              >
+                &times;
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div style={{ padding: "20px 24px", overflowY: "auto", flex: 1 }}>
+              {(() => {
+                // Find all groups linked to this candidate type
+                const matchingGroups = groups.filter((g) => g.candidate_type === selectedCandTypeForDetails.id);
+                const matchingGroupIds = new Set(matchingGroups.map((g) => g.id));
+                const groupNameMap = new Map(matchingGroups.map((g) => [g.id, g.name]));
+
+                // Find active memberships for those groups
+                const matchingMembers = memberships.filter(
+                  (m) => matchingGroupIds.has(m.group) && m.is_active !== false
+                );
+
+                // Map learner ID to their assigned groups (prevent duplicate rows for a learner)
+                const learnerGroupMap = new Map();
+                matchingMembers.forEach((m) => {
+                  const gName = groupNameMap.get(m.group) || m.group_name || `Group #${m.group}`;
+                  if (!learnerGroupMap.has(m.learner)) {
+                    learnerGroupMap.set(m.learner, new Set());
+                  }
+                  learnerGroupMap.get(m.learner).add(gName);
+                });
+
+                const uniqueLearners = [];
+                learnerGroupMap.forEach((groupSet, learnerId) => {
+                  const learnerObj = learners.find((l) => l.id === learnerId);
+                  const fullName = learnerObj
+                    ? [learnerObj.first_name, learnerObj.last_name].filter(Boolean).join(" ")
+                    : "";
+                  const displayName = fullName || learnerObj?.username || `Learner #${learnerId}`;
+                  const email = learnerObj?.email || "—";
+                  const assignedGroups = Array.from(groupSet).join(", ") || "—";
+                  const isActive = learnerObj?.is_active ?? true;
+
+                  uniqueLearners.push({
+                    id: learnerId,
+                    displayName,
+                    username: learnerObj?.username,
+                    email,
+                    assignedGroups,
+                    isActive,
+                  });
+                });
+
+                if (uniqueLearners.length === 0) {
+                  return (
+                    <div style={{ textAlign: "center", padding: "48px 16px", color: "var(--text-secondary)" }}>
+                      <p style={{ margin: 0, fontSize: "14px" }}>
+                        No learners are currently assigned to this candidate type.
+                      </p>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="table-container" style={{ border: "1px solid var(--border-color)", borderRadius: "var(--radius-sm)" }}>
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th style={{ width: "60px" }}>S.No.</th>
+                          <th>Learner Name</th>
+                          <th>Email Address</th>
+                          <th>Assigned Group</th>
+                          <th>Account Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {uniqueLearners.map((lrn, index) => (
+                          <tr key={lrn.id}>
+                            <td style={{ color: "var(--text-secondary)" }}>{index + 1}</td>
+                            <td>
+                              <strong style={{ color: "var(--text-main)" }}>{lrn.displayName}</strong>
+                              {lrn.username && lrn.username !== lrn.displayName && (
+                                <div style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
+                                  @{lrn.username}
+                                </div>
+                              )}
+                            </td>
+                            <td style={{ color: "var(--text-secondary)", fontSize: "13px" }}>
+                              {lrn.email}
+                            </td>
+                            <td>
+                              <span className="badge badge-purple">{lrn.assignedGroups}</span>
+                            </td>
+                            <td>
+                              <span className={`badge ${lrn.isActive ? "badge-success" : "badge-warning"}`}>
+                                {lrn.isActive ? "Active" : "Inactive"}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Modal Footer */}
+            <div
+              style={{
+                padding: "14px 24px",
+                borderTop: "1px solid var(--border-color)",
+                display: "flex",
+                justifyContent: "flex-end",
+                backgroundColor: "var(--bg-card)",
+              }}
+            >
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setSelectedCandTypeForDetails(null)}
+                style={{ padding: "6px 14px", fontSize: "13px" }}
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -15,7 +15,7 @@ class ModuleMaterialViewerAPITest(APITestCase):
 
         self.course = Course.objects.create(name='Test Course', code='TC01', status=PublicationStatus.PUBLISHED)
         self.cluster = TrainingCluster.objects.create(course=self.course, name='Cluster 1', code='CL01', order=1)
-        self.module = Module.objects.create(course=self.course, name='Test Module', code='TM01', order=1, status=PublicationStatus.PUBLISHED)
+        self.module = Module.objects.create(course=self.course, name='Test Module', order=1, status=PublicationStatus.PUBLISHED)
         self.submodule = Submodule.objects.create(module=self.module, name='Lesson 1', order=1, status=PublicationStatus.PUBLISHED)
 
         # Create training file using SimpleUploadedFile so it properly lives in media storage

@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useMemo } from "react";
 import { apiClient } from "../../services/api";
 
 export default function ReportsView({ portalRole = "ADMIN" }) {
-  const [activeSection, setActiveSection] = useState("overview"); // 'overview' | 'performance' | 'progress'
+  const [activeSection, setActiveSection] = useState("overview"); // 'overview' | 'performance'
 
   // Overview Data
   const [overviewData, setOverviewData] = useState(null);
@@ -25,6 +25,8 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
   const [courseSearch, setCourseSearch] = useState("");
   const [selectedCourseFilter, setSelectedCourseFilter] = useState("ALL");
   const [coursesList, setCoursesList] = useState([]);
+  const [courseLevels, setCourseLevels] = useState([]);
+  const [modulesList, setModulesList] = useState([]);
 
   // Inspect Individual Learner Modal/Drawer
   const [inspectLearnerId, setInspectLearnerId] = useState(null);
@@ -53,7 +55,11 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
       let endpoint = "/reports/learner-performance/";
       const params = [];
       if (courseFilter && courseFilter !== "ALL") {
-        params.push(`course=${courseFilter}`);
+        if (String(courseFilter).startsWith("level:")) {
+          params.push(`level=${String(courseFilter).slice(6)}`);
+        } else {
+          params.push(`course=${courseFilter}`);
+        }
       }
       if (params.length > 0) {
         endpoint += `?${params.join("&")}`;
@@ -76,8 +82,13 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
       const data = await apiClient("/reports/course-progress/");
       const list = Array.isArray(data) ? data : [];
       setCourseProgressData(list);
-      // Populate unique course filter options
-      setCoursesList(list.map((c) => ({ id: c.course_id, name: c.course_name })));
+      // Populate unique course/independent-level filter options
+      setCoursesList(
+        list.map((c) => ({
+          id: c.course_id != null ? String(c.course_id) : `level:${c.level_id ?? c.course_name}`,
+          name: c.course_name || c.level_name,
+        }))
+      );
     } catch (err) {
       setCourseProgressError(err.message || "Failed to load course progress reports.");
     } finally {
@@ -90,10 +101,12 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
     let isMounted = true;
     async function loadAll() {
       try {
-        const [ovRes, perfRes, cpRes] = await Promise.allSettled([
+        const [ovRes, perfRes, cpRes, lvlRes, modRes] = await Promise.allSettled([
           apiClient("/reports/overview/"),
           apiClient("/reports/learner-performance/"),
           apiClient("/reports/course-progress/"),
+          apiClient("/course-levels/"),
+          apiClient("/modules/"),
         ]);
 
         if (!isMounted) return;
@@ -118,11 +131,26 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
         if (cpRes.status === "fulfilled") {
           const list = Array.isArray(cpRes.value) ? cpRes.value : [];
           setCourseProgressData(list);
-          setCoursesList(list.map((c) => ({ id: c.course_id, name: c.course_name })));
+          setCoursesList(
+            list.map((c) => ({
+              id: c.course_id != null ? String(c.course_id) : `level:${c.level_id ?? c.course_name}`,
+              name: c.course_name || c.level_name,
+            }))
+          );
           setCourseProgressLoading(false);
         } else {
           setCourseProgressError(cpRes.reason?.message || "Failed to load course progress report.");
           setCourseProgressLoading(false);
+        }
+
+        if (lvlRes.status === "fulfilled") {
+          const list = Array.isArray(lvlRes.value) ? lvlRes.value : (lvlRes.value?.results || []);
+          setCourseLevels(list);
+        }
+
+        if (modRes.status === "fulfilled") {
+          const list = Array.isArray(modRes.value) ? modRes.value : (modRes.value?.results || []);
+          setModulesList(list);
         }
       } catch {
         if (isMounted) {
@@ -152,25 +180,197 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
     }
   };
 
-  // Filtered performance records
+  // Helper to dynamically resolve the accurate level name for a learner's course or progress record
+  const getLearnerLevelName = useCallback(
+    (lp, learnerId = null) => {
+      if (lp?.level_name) {
+        return lp.level_name;
+      }
+      if (!courseLevels || courseLevels.length === 0) {
+        return lp?.course_name || "Level 1";
+      }
+
+      const targetLearnerId = learnerId || lp?.learner_id || lp?.id;
+
+      // 1. Check if learner has modules with progress or assessment attempts in lp.modules_progress
+      const modProgress = lp?.modules_progress || [];
+      const activeMod =
+        modProgress.find((m) => m.status === "IN PROGRESS") ||
+        modProgress.find((m) => m.status === "COMPLETED") ||
+        modProgress[0];
+
+      if (activeMod && modulesList && modulesList.length > 0) {
+        const foundMod = modulesList.find((m) => m.id === activeMod.module_id);
+        if (foundMod) {
+          const lvlId = foundMod.level_id || (typeof foundMod.level === "object" ? foundMod.level?.id : foundMod.level);
+          const matchedLvl = courseLevels.find((lvl) => lvl.id === lvlId);
+          if (matchedLvl?.name) {
+            return matchedLvl.name;
+          }
+        }
+      }
+
+      // 2. Check performanceData for this learner & course to find their actual active/submitted modules
+      if (targetLearnerId && performanceData && performanceData.length > 0 && modulesList && modulesList.length > 0) {
+        const learnerItems = performanceData.filter(
+          (p) => String(p.learner_id) === String(targetLearnerId) && (lp?.course_id ? String(p.course_id) === String(lp.course_id) : true)
+        );
+        for (const item of learnerItems) {
+          const foundMod = modulesList.find((m) => m.id === item.module_id);
+          if (foundMod) {
+            const lvlId = foundMod.level_id || (typeof foundMod.level === "object" ? foundMod.level?.id : foundMod.level);
+            const matchedLvl = courseLevels.find((lvl) => lvl.id === lvlId);
+            if (matchedLvl?.name) {
+              return matchedLvl.name;
+            }
+          }
+        }
+      }
+
+      // 3. Direct course level lookup for this course with lowest order
+      const courseLvls = courseLevels
+        .filter((lvl) => String(lvl.course) === String(lp?.course_id))
+        .sort((a, b) => (a.order || 0) - (b.order || 0));
+
+      if (courseLvls.length > 0 && courseLvls[0]?.name) {
+        return courseLvls[0].name;
+      }
+
+      // 4. Any matched level in courseLevels
+      const fallbackLvl = courseLevels.find((lvl) => String(lvl.course) === String(lp?.course_id)) || courseLevels[0];
+      return fallbackLvl?.name || "Level 1";
+    },
+    [courseLevels, modulesList, performanceData]
+  );
+
+  // Filtered and aggregated performance records:
+  // Consolidated one row per learner per module using their applicable assessment attempt
   const filteredPerformance = useMemo(() => {
-    return performanceData.filter((item) => {
-      if (selectedCourseFilter !== "ALL" && String(item.course_id) !== String(selectedCourseFilter)) {
-        return false;
+    // 1. Group records by (learner_id, module_id)
+    const groups = new Map();
+    (performanceData || []).forEach((item) => {
+      const key = `${item.learner_id}_${item.module_id}`;
+      if (!groups.has(key)) {
+        groups.set(key, []);
+      }
+      groups.get(key).push(item);
+    });
+
+    const aggregated = [];
+    groups.forEach((items) => {
+      // Group items by attempt_number to avoid combining scores across different attempts
+      const attemptsMap = new Map();
+      items.forEach((it) => {
+        const attNum = it.attempt_number || 1;
+        if (!attemptsMap.has(attNum)) {
+          attemptsMap.set(attNum, []);
+        }
+        attemptsMap.get(attNum).push(it);
+      });
+
+      // Find the applicable attempt: attempt with highest total score, or highest attempt number
+      let bestAttempt = null;
+      let highestScore = -1;
+      attemptsMap.forEach((attItems, attNum) => {
+        const totalMarksObtained = attItems.reduce(
+          (sum, i) => sum + (typeof i.marks_obtained === "number" ? i.marks_obtained : 0),
+          0
+        );
+        if (totalMarksObtained > highestScore || bestAttempt === null) {
+          highestScore = totalMarksObtained;
+          bestAttempt = {
+            attemptNumber: attNum,
+            items: attItems,
+            score: totalMarksObtained,
+          };
+        }
+      });
+
+      const applicableItems = bestAttempt?.items || items;
+      const primaryItem = applicableItems[0] || items[0];
+
+      // Calculate total marks for the module (e.g., 3/5)
+      const marksObtained = bestAttempt ? bestAttempt.score : 0;
+      const totalMarks =
+        applicableItems.reduce(
+          (sum, i) => sum + (typeof i.total_marks === "number" ? i.total_marks : 1),
+          0
+        ) || 5;
+
+      // PASS/FAIL result based on existing 3/5 (60%) threshold
+      const result = marksObtained >= 3 ? "PASS" : "FAIL";
+
+      // Submission date of the applicable attempt
+      const submissionDate =
+        applicableItems.find((i) => i.submission_date)?.submission_date ||
+        primaryItem.submission_date;
+
+      // Resolve Level name / number
+      // Check matching level from courseLevels or primaryItem.level / level_name
+      let levelDisplay = "Level 1";
+      if (primaryItem.level_name) {
+        levelDisplay = primaryItem.level_name;
+      } else if (courseLevels.length > 0) {
+        const matchedLevel =
+          courseLevels.find((lvl) => lvl.id === primaryItem.level_id || lvl.id === primaryItem.level) ||
+          courseLevels.find((lvl) => lvl.course === primaryItem.course_id);
+        if (matchedLevel) {
+          levelDisplay = matchedLevel.name || `Level ${matchedLevel.order || 1}`;
+        }
+      }
+
+      aggregated.push({
+        learner_id: primaryItem.learner_id,
+        learner_name: primaryItem.learner_name,
+        email: primaryItem.email,
+        course_id: primaryItem.course_id,
+        course_name: primaryItem.course_name,
+        level_id: primaryItem.level_id,
+        level_display: levelDisplay,
+        module_id: primaryItem.module_id,
+        module_name: primaryItem.module_name,
+        marks_obtained: marksObtained,
+        total_marks: totalMarks,
+        result: result,
+        submission_date: submissionDate,
+      });
+    });
+
+    // Sort by latest submission date
+    aggregated.sort((a, b) => new Date(b.submission_date || 0) - new Date(a.submission_date || 0));
+
+    // 2. Apply search and course filters
+    return aggregated.filter((item) => {
+      if (selectedCourseFilter !== "ALL") {
+        if (String(selectedCourseFilter).startsWith("level:")) {
+          const targetLvlId = String(selectedCourseFilter).slice(6);
+          if (String(item.level_id) !== targetLvlId && String(item.level_display) !== targetLvlId) {
+            return false;
+          }
+        } else if (String(item.course_id) !== String(selectedCourseFilter)) {
+          return false;
+        }
       }
       if (learnerSearch.trim()) {
         const q = learnerSearch.toLowerCase().trim();
         const name = (item.learner_name || "").toLowerCase();
         const email = (item.email || "").toLowerCase();
+        const level = (item.level_display || "").toLowerCase();
         const course = (item.course_name || "").toLowerCase();
         const module = (item.module_name || "").toLowerCase();
-        if (!name.includes(q) && !email.includes(q) && !course.includes(q) && !module.includes(q)) {
+        if (
+          !name.includes(q) &&
+          !email.includes(q) &&
+          !level.includes(q) &&
+          !course.includes(q) &&
+          !module.includes(q)
+        ) {
           return false;
         }
       }
       return true;
     });
-  }, [performanceData, selectedCourseFilter, learnerSearch]);
+  }, [performanceData, courseLevels, selectedCourseFilter, learnerSearch]);
 
   // Filtered course progress records
   const filteredCourseProgress = useMemo(() => {
@@ -206,22 +406,8 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
 
   return (
     <div className="reports-container">
-      {/* Header & Sub-navigation */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px", flexWrap: "wrap", gap: "12px" }}>
-        <div>
-          <h2 style={{ fontSize: "20px", fontWeight: "700", color: "var(--text-main)", margin: 0 }}>
-            {portalRole === "LEARNER" ? "My Learning Reports" : portalRole === "TRAINER" ? "Trainer Performance & Progress Reports" : "Enterprise Reports"}
-          </h2>
-          <p style={{ fontSize: "13px", color: "var(--text-secondary)", marginTop: "4px", margin: 0 }}>
-            {portalRole === "LEARNER"
-              ? "Track your individual course progress, completion status, and evaluation history."
-              : portalRole === "TRAINER"
-              ? "Monitor training progress, module completions, and scores for your assigned learners."
-              : "System-wide reporting for learner progress, assessment evaluation, and course completion."}
-          </p>
-        </div>
-
-        {/* Section Tabs */}
+      {/* Section Sub-navigation Tabs */}
+      <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", marginBottom: "20px" }}>
         <div style={{ display: "inline-flex", background: "var(--bg-card)", padding: "4px", borderRadius: "var(--radius-md)", border: "1px solid var(--border-color)" }}>
           <button
             type="button"
@@ -238,14 +424,6 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
             style={{ padding: "6px 14px", fontSize: "13px", borderRadius: "var(--radius-sm)" }}
           >
             Learner Performance
-          </button>
-          <button
-            type="button"
-            className={`btn ${activeSection === "progress" ? "btn-primary" : "btn-secondary"}`}
-            onClick={() => setActiveSection("progress")}
-            style={{ padding: "6px 14px", fontSize: "13px", borderRadius: "var(--radius-sm)" }}
-          >
-            Course Progress
           </button>
         </div>
       </div>
@@ -269,67 +447,275 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
             </div>
           ) : (
             <>
-              {/* Stat Cards Grid */}
-              <div className="stats-grid" style={{ marginBottom: "20px" }}>
-                <div className="stat-card">
-                  <div className="stat-header">Overall Completion Rate</div>
-                  <div className="stat-value" style={{ color: "var(--status-success)" }}>
-                    {overviewData?.overall_completion_percentage ?? 0}%
-                  </div>
-                  <div className="stat-footer">Across verified required questions</div>
-                </div>
-
-                <div className="stat-card">
-                  <div className="stat-header">Total Learners</div>
-                  <div className="stat-value">{overviewData?.total_learners ?? 0}</div>
-                  <div className="stat-footer">
-                    {portalRole === "LEARNER" ? "Enrolled learner account" : portalRole === "TRAINER" ? "In assigned cohorts" : "Active in system"}
-                  </div>
-                </div>
-
-                <div className="stat-card">
-                  <div className="stat-header">Total Courses</div>
-                  <div className="stat-value">{overviewData?.total_courses ?? 0}</div>
-                  <div className="stat-footer">Published curriculum courses</div>
-                </div>
-
-                <div className="stat-card">
-                  <div className="stat-header">Total Enrollments</div>
-                  <div className="stat-value">{overviewData?.total_assigned_enrollments ?? 0}</div>
-                  <div className="stat-footer">Active training allocations</div>
-                </div>
-              </div>
-
-              {/* Course Status Breakdown Card */}
+              {/* Learner Progress Overview */}
               <div className="card" style={{ padding: "20px" }}>
-                <h3 style={{ fontSize: "16px", fontWeight: "700", color: "var(--text-main)", marginBottom: "16px" }}>
-                  Course Enrollment Status Breakdown
-                </h3>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "16px" }}>
-                  <div style={{ background: "rgba(34, 197, 94, 0.08)", padding: "16px", borderRadius: "var(--radius-sm)", border: "1px solid rgba(34, 197, 94, 0.2)" }}>
-                    <div style={{ fontSize: "12px", fontWeight: "600", color: "var(--status-success)", textTransform: "uppercase" }}>Completed</div>
-                    <div style={{ fontSize: "24px", fontWeight: "700", color: "var(--text-main)", marginTop: "4px" }}>
-                      {overviewData?.completed_courses ?? 0}
-                    </div>
-                    <div style={{ fontSize: "12px", color: "var(--text-secondary)", marginTop: "2px" }}>All required module questions answered</div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexWrap: "wrap", gap: "10px" }}>
+                  <div>
+                    <h3 style={{ fontSize: "16px", fontWeight: "700", color: "var(--text-main)", margin: "0 0 4px 0" }}>
+                      Learner Progress Overview
+                    </h3>
+                    <p style={{ fontSize: "12px", color: "var(--text-secondary)", margin: 0 }}>
+                      Individual learner progress, module enrollment status breakdown, and assessment results.
+                    </p>
                   </div>
-
-                  <div style={{ background: "rgba(56, 189, 248, 0.08)", padding: "16px", borderRadius: "var(--radius-sm)", border: "1px solid rgba(56, 189, 248, 0.2)" }}>
-                    <div style={{ fontSize: "12px", fontWeight: "600", color: "#38bdf8", textTransform: "uppercase" }}>In Progress</div>
-                    <div style={{ fontSize: "24px", fontWeight: "700", color: "var(--text-main)", marginTop: "4px" }}>
-                      {overviewData?.in_progress_courses ?? 0}
-                    </div>
-                    <div style={{ fontSize: "12px", color: "var(--text-secondary)", marginTop: "2px" }}>Partially completed or ongoing</div>
-                  </div>
-
-                  <div style={{ background: "rgba(148, 163, 184, 0.08)", padding: "16px", borderRadius: "var(--radius-sm)", border: "1px solid rgba(148, 163, 184, 0.2)" }}>
-                    <div style={{ fontSize: "12px", fontWeight: "600", color: "var(--text-secondary)", textTransform: "uppercase" }}>Not Started</div>
-                    <div style={{ fontSize: "24px", fontWeight: "700", color: "var(--text-main)", marginTop: "4px" }}>
-                      {overviewData?.not_started_courses ?? 0}
-                    </div>
-                    <div style={{ fontSize: "12px", color: "var(--text-secondary)", marginTop: "2px" }}>Zero questions answered yet</div>
-                  </div>
+                  <span className="badge badge-info" style={{ fontSize: "12px", padding: "4px 10px" }}>
+                    {overviewData?.learners_progress?.length || 0} {overviewData?.learners_progress?.length === 1 ? "Learner Record" : "Learner Records"}
+                  </span>
                 </div>
+
+                {(!overviewData?.learners_progress || overviewData.learners_progress.length === 0) ? (
+                  <div style={{ padding: "36px 20px", textAlign: "center", color: "var(--text-secondary)", background: "var(--bg-surface)", borderRadius: "var(--radius-sm)", border: "1px dashed var(--border-color)" }}>
+                    <p style={{ margin: 0, fontSize: "14px", fontWeight: "500" }}>No learner progress records found.</p>
+                    <p style={{ margin: "4px 0 0 0", fontSize: "12px", color: "var(--text-muted)" }}>
+                      {portalRole === "TRAINER"
+                        ? "No learners are currently assigned to your active training groups."
+                        : "No active learners or course allocations were found."}
+                    </p>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+                    {overviewData.learners_progress.map((lp, idx) => (
+                      <div
+                        key={`${lp.learner_id}-${lp.course_id ?? `lvl-${lp.level_id}`}-${idx}`}
+                        style={{
+                          backgroundColor: "#ffffff",
+                          border: "1px solid var(--border-color)",
+                          borderRadius: "var(--radius-sm, 8px)",
+                          padding: "18px 20px",
+                          boxShadow: "0 1px 3px rgba(0, 0, 0, 0.04)",
+                        }}
+                      >
+                        {/* Learner Info Header */}
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px", borderBottom: "1px solid var(--border-color)", paddingBottom: "14px", marginBottom: "14px" }}>
+                          <div>
+                            <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+                              <h4 style={{ margin: 0, fontSize: "15px", fontWeight: "700", color: "var(--text-main)" }}>
+                                {lp.learner_name}
+                              </h4>
+                              {lp.learner_username && lp.learner_username !== lp.learner_name && (
+                                <span style={{ fontSize: "12px", color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+                                  ({lp.learner_username})
+                                </span>
+                              )}
+                              <span
+                                className={`badge ${
+                                  lp.enrollment_status === "COMPLETED"
+                                    ? "badge-success"
+                                    : lp.enrollment_status === "IN_PROGRESS"
+                                    ? "badge-info"
+                                    : "badge-secondary"
+                                }`}
+                                style={{ fontSize: "11px", fontWeight: "600" }}
+                              >
+                                {lp.enrollment_status === "COMPLETED" ? "Completed" : lp.enrollment_status === "IN_PROGRESS" ? "In Progress" : "Not Started"}
+                              </span>
+                            </div>
+                            <div style={{ fontSize: "13px", color: "var(--text-secondary)", marginTop: "4px" }}>
+                              Course:{" "}
+                              <strong style={{ color: "var(--text-main)" }}>
+                                {getLearnerLevelName(lp)}
+                              </strong>
+                              {lp.learner_email && (
+                                <span style={{ marginLeft: "10px", color: "var(--text-muted)", fontSize: "12px" }}>
+                                  &bull; {lp.learner_email}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Progress summary pill */}
+                          <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+                            <div style={{ textAlign: "right" }}>
+                              <div style={{ fontSize: "11px", textTransform: "uppercase", color: "var(--text-secondary)", fontWeight: "600" }}>
+                                Overall Course Progress
+                              </div>
+                              <div style={{ fontSize: "18px", fontWeight: "700", color: lp.overall_progress_percentage === 100 ? "var(--status-success)" : "var(--color-primary, #2563eb)" }}>
+                                {lp.overall_progress_percentage}%
+                              </div>
+                            </div>
+                            <div style={{ fontSize: "12px", color: "var(--text-secondary)", background: "var(--bg-surface)", padding: "6px 12px", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
+                              <strong>{lp.completed_modules}</strong> of <strong>{lp.total_required_modules}</strong> Modules Completed
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Breakdown Grid: Course Enrollment Status Breakdown & Assessment Results */}
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "16px" }}>
+                          {/* Course Enrollment Status Breakdown (Individual) */}
+                          <div style={{ background: "var(--bg-surface, #f8fafc)", padding: "14px 16px", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
+                            <div style={{ fontSize: "12px", fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text-secondary)", marginBottom: "10px" }}>
+                              Course Enrollment Status Breakdown
+                            </div>
+                            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                              <thead>
+                                <tr style={{ borderBottom: "1px solid var(--border-color)", textAlign: "left" }}>
+                                  <th style={{ padding: "6px 0", color: "var(--text-secondary)", fontWeight: "600" }}>Status</th>
+                                  <th style={{ padding: "6px 0", color: "var(--text-secondary)", fontWeight: "600", textAlign: "right" }}>Count</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                <tr style={{ borderBottom: "1px solid rgba(0,0,0,0.04)" }}>
+                                  <td style={{ padding: "8px 0", display: "flex", alignItems: "center", gap: "6px" }}>
+                                    <span style={{ width: "8px", height: "8px", borderRadius: "50%", backgroundColor: "var(--status-success)" }}></span>
+                                    <span>Completed</span>
+                                  </td>
+                                  <td style={{ padding: "8px 0", textAlign: "right", fontWeight: "700", color: "var(--status-success)" }}>
+                                    {lp.completed_modules}
+                                  </td>
+                                </tr>
+                                <tr>
+                                  <td style={{ padding: "8px 0", display: "flex", alignItems: "center", gap: "6px" }}>
+                                    <span style={{ width: "8px", height: "8px", borderRadius: "50%", backgroundColor: "#94a3b8" }}></span>
+                                    <span>Not Started</span>
+                                  </td>
+                                  <td style={{ padding: "8px 0", textAlign: "right", fontWeight: "700", color: "#64748b" }}>
+                                    {lp.not_started_modules}
+                                  </td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+
+                          {/* Assessment Results (Module 1 & Module 2) */}
+                          <div style={{ background: "var(--bg-surface, #f8fafc)", padding: "14px 16px", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
+                            <div style={{ fontSize: "12px", fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text-secondary)", marginBottom: "10px" }}>
+                              Assessment Results (Modules 1 &amp; 2)
+                            </div>
+                            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                              <thead>
+                                <tr style={{ borderBottom: "1px solid var(--border-color)", textAlign: "left" }}>
+                                  <th style={{ padding: "6px 0", color: "var(--text-secondary)", fontWeight: "600" }}>Module</th>
+                                  <th style={{ padding: "6px 0", color: "var(--text-secondary)", fontWeight: "600", textAlign: "center" }}>Score</th>
+                                  <th style={{ padding: "6px 0", color: "var(--text-secondary)", fontWeight: "600", textAlign: "center" }}>Result</th>
+                                  <th style={{ padding: "6px 0", color: "var(--text-secondary)", fontWeight: "600", textAlign: "right" }}>Status</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {(lp.assessment_results && lp.assessment_results.length > 0) ? (
+                                  lp.assessment_results.map((ar) => (
+                                    <tr key={ar.module_id} style={{ borderBottom: "1px solid rgba(0,0,0,0.04)" }}>
+                                      <td style={{ padding: "8px 0", fontWeight: "500", color: "var(--text-main)", maxWidth: "160px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={ar.module_name}>
+                                        {ar.module_name.split(" - ")[0]}
+                                      </td>
+                                      <td style={{ padding: "8px 0", textAlign: "center", fontFamily: "var(--font-mono)", color: "var(--text-main)" }}>
+                                        {ar.score_display}
+                                      </td>
+                                      <td style={{ padding: "8px 0", textAlign: "center" }}>
+                                        <span
+                                          className={`badge ${
+                                            ar.result === "PASS"
+                                              ? "badge-success"
+                                              : ar.result === "FAIL"
+                                              ? "badge-error"
+                                              : "badge-secondary"
+                                          }`}
+                                          style={{ fontSize: "10px", padding: "2px 6px" }}
+                                        >
+                                          {ar.result}
+                                        </span>
+                                      </td>
+                                      <td style={{ padding: "8px 0", textAlign: "right" }}>
+                                        <span style={{ fontSize: "12px", color: ar.is_completed ? "var(--status-success)" : "var(--text-secondary)", fontWeight: ar.is_completed ? "600" : "normal" }}>
+                                          {ar.completion_status}
+                                        </span>
+                                      </td>
+                                    </tr>
+                                  ))
+                                ) : (
+                                  <tr>
+                                    <td colSpan={4} style={{ padding: "12px 0", textAlign: "center", color: "var(--text-muted)", fontSize: "12px" }}>
+                                      No assessment modules configured for this course.
+                                    </td>
+                                  </tr>
+                                )}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+
+                        {/* Module-wise Learning Progress (Available only on Learner Portal) */}
+                        {portalRole === "LEARNER" && lp.modules_progress && lp.modules_progress.length > 0 && (
+                          <div style={{ marginTop: "16px", background: "var(--bg-surface, #f8fafc)", padding: "14px 16px", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                              <div style={{ fontSize: "12px", fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text-secondary)" }}>
+                                Module-wise Learning Progress ({lp.modules_progress.length} Modules)
+                              </div>
+                              <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>
+                                Passing threshold: 3/5 marks
+                              </span>
+                            </div>
+                            <div style={{ maxHeight: "360px", overflowY: "auto", border: "1px solid var(--border-color)", borderRadius: "4px", backgroundColor: "#ffffff" }}>
+                              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px" }}>
+                                <thead>
+                                  <tr style={{ background: "var(--bg-surface, #f8fafc)", borderBottom: "1px solid var(--border-color)", position: "sticky", top: 0, zIndex: 1 }}>
+                                    <th style={{ padding: "8px 12px", textAlign: "left", color: "var(--text-secondary)", fontWeight: "600" }}>Module Name</th>
+                                    <th style={{ padding: "8px 12px", textAlign: "center", color: "var(--text-secondary)", fontWeight: "600" }}>Questions Status</th>
+                                    <th style={{ padding: "8px 12px", textAlign: "center", color: "var(--text-secondary)", fontWeight: "600" }}>Assessment Score</th>
+                                    <th style={{ padding: "8px 12px", textAlign: "center", color: "var(--text-secondary)", fontWeight: "600" }}>Result</th>
+                                    <th style={{ padding: "8px 12px", textAlign: "right", color: "var(--text-secondary)", fontWeight: "600" }}>Status</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {lp.modules_progress.map((mp, mIdx) => (
+                                    <tr key={mp.module_id || mIdx} style={{ borderBottom: "1px solid rgba(0,0,0,0.04)" }}>
+                                      <td style={{ padding: "8px 12px", fontWeight: "500", color: "var(--text-main)" }}>
+                                        {mp.module_name}
+                                      </td>
+                                      <td style={{ padding: "8px 12px", textAlign: "center", color: "var(--text-secondary)" }}>
+                                        {mp.total_required_questions > 0 ? (
+                                          <span style={{ fontFamily: "var(--font-mono)" }}>
+                                            {mp.answered_required_questions}/{mp.total_required_questions} answered
+                                          </span>
+                                        ) : (
+                                          <span style={{ color: "var(--text-muted)" }}>Reading material</span>
+                                        )}
+                                      </td>
+                                      <td style={{ padding: "8px 12px", textAlign: "center", fontFamily: "var(--font-mono)" }}>
+                                        {mp.is_tested_module ? mp.score_display : "—"}
+                                      </td>
+                                      <td style={{ padding: "8px 12px", textAlign: "center" }}>
+                                        {mp.is_tested_module ? (
+                                          <span
+                                            className={`badge ${
+                                              mp.result === "PASS"
+                                                ? "badge-success"
+                                                : mp.result === "FAIL"
+                                                ? "badge-error"
+                                                : "badge-secondary"
+                                            }`}
+                                            style={{ fontSize: "10px", padding: "2px 6px" }}
+                                          >
+                                            {mp.result}
+                                          </span>
+                                        ) : (
+                                          <span style={{ color: "var(--text-muted)" }}>—</span>
+                                        )}
+                                      </td>
+                                      <td style={{ padding: "8px 12px", textAlign: "right" }}>
+                                        <span
+                                          className={`badge ${
+                                            mp.status === "COMPLETED"
+                                              ? "badge-success"
+                                              : mp.status === "IN PROGRESS"
+                                              ? "badge-info"
+                                              : "badge-secondary"
+                                          }`}
+                                          style={{ fontSize: "10px", padding: "2px 6px" }}
+                                        >
+                                          {mp.status}
+                                        </span>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </>
           )}
@@ -436,9 +822,8 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
                       <th style={{ padding: "12px 18px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase" }}>Learner</th>
                       <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase" }}>Course</th>
                       <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase" }}>Module</th>
-                      <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase" }}>Assessment / Item</th>
-                      <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase" }}>Score</th>
-                      <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase" }}>Percentage</th>
+                      <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase" }}>Marks Obtained</th>
+                      <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase" }}>Result</th>
                       <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase" }}>Submission Date</th>
                       {portalRole !== "LEARNER" && (
                         <th style={{ padding: "12px 18px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase", textAlign: "right" }}>Inspect</th>
@@ -452,29 +837,22 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
                           <div style={{ fontWeight: "600", fontSize: "13px", color: "var(--text-main)" }}>{item.learner_name}</div>
                           {item.email && <div style={{ fontSize: "11px", color: "var(--text-muted)" }}>{item.email}</div>}
                         </td>
-                        <td style={{ padding: "12px 16px", fontSize: "13px", color: "var(--text-secondary)" }}>{item.course_name}</td>
+                        <td style={{ padding: "12px 16px", fontSize: "13px", color: "var(--text-secondary)" }}>{item.level_display}</td>
                         <td style={{ padding: "12px 16px", fontSize: "13px", color: "var(--text-secondary)" }}>{item.module_name}</td>
-                        <td style={{ padding: "12px 16px", fontSize: "13px", color: "var(--text-secondary)", maxWidth: "220px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.assessment_name}>
-                          {item.assessment_name || "Module Completion Question"}
+                        <td style={{ padding: "12px 16px" }}>
+                          <span style={{ fontWeight: "700", color: "var(--accent-primary)" }}>
+                            {item.marks_obtained} / {item.total_marks ?? 5}
+                          </span>
                         </td>
                         <td style={{ padding: "12px 16px" }}>
-                          {item.is_scored ? (
-                            <span style={{ fontWeight: "700", color: "var(--accent-primary)" }}>
-                              {item.marks_obtained} / {item.total_marks ?? "-"}
+                          {item.result === "PASS" ? (
+                            <span className="badge badge-success" style={{ fontWeight: "700", fontSize: "11px", padding: "3px 8px" }}>
+                              PASS
                             </span>
                           ) : (
-                            <span style={{ fontSize: "12px", color: "var(--text-muted)", fontStyle: "italic" }}>
-                              Non-scored completion
+                            <span className="badge badge-error" style={{ fontWeight: "700", fontSize: "11px", padding: "3px 8px" }}>
+                              FAIL
                             </span>
-                          )}
-                        </td>
-                        <td style={{ padding: "12px 16px" }}>
-                          {item.percentage !== null ? (
-                            <span style={{ fontWeight: "600", color: "var(--status-success)" }}>
-                              {item.percentage}%
-                            </span>
-                          ) : (
-                            <span style={{ color: "var(--text-muted)" }}>-</span>
                           )}
                         </td>
                         <td style={{ padding: "12px 16px", fontSize: "12px", color: "var(--text-secondary)" }}>
@@ -563,9 +941,9 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
                       <p style={{ fontSize: "13px", color: "var(--text-muted)" }}>No assigned courses found for this learner.</p>
                     ) : (
                       <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                        {inspectedLearnerData.courses.map((c) => (
+                        {inspectedLearnerData.courses.map((c, idx) => (
                           <div
-                            key={c.course_id}
+                            key={c.course_id != null ? `crs-${c.course_id}-${c.level_id ?? idx}` : `lvl-${c.level_id ?? idx}`}
                             style={{
                               padding: "12px 14px",
                               border: "1px solid var(--border-color)",
@@ -577,7 +955,7 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
                           >
                             <div>
                               <div style={{ fontWeight: "600", fontSize: "13px", color: "var(--text-main)" }}>
-                                {c.course_name}
+                                {getLearnerLevelName(c, inspectedLearnerData.id)}
                               </div>
                               <div style={{ fontSize: "12px", color: "var(--text-secondary)", marginTop: "2px" }}>
                                 Modules: {c.completed_modules} / {c.total_modules} completed
@@ -607,138 +985,6 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
               </div>
             </div>
           )}
-        </div>
-      )}
-
-      {/* =========================================================================
-          SECTION C: COURSE PROGRESS
-         ========================================================================= */}
-      {activeSection === "progress" && (
-        <div>
-          {/* Search Bar */}
-          <div className="card" style={{ padding: "14px 18px", marginBottom: "16px" }}>
-            <div style={{ display: "flex", gap: "14px", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "10px", flex: "1 1 240px", maxWidth: "380px" }}>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="Filter courses by name or program..."
-                  value={courseSearch}
-                  onChange={(e) => setCourseSearch(e.target.value)}
-                  style={{ width: "100%", fontSize: "13px" }}
-                />
-                {courseSearch && (
-                  <button type="button" className="btn btn-secondary" onClick={() => setCourseSearch("")} style={{ padding: "6px 10px", fontSize: "12px" }}>
-                    Clear
-                  </button>
-                )}
-              </div>
-
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={fetchCourseProgress}
-                disabled={courseProgressLoading}
-                style={{ padding: "6px 12px", fontSize: "13px" }}
-              >
-                Refresh
-              </button>
-            </div>
-          </div>
-
-          {/* Course Progress Table */}
-          {courseProgressError && (
-            <div className="alert alert-error" style={{ marginBottom: "16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span>{courseProgressError}</span>
-              <button type="button" className="btn btn-secondary" onClick={fetchCourseProgress} style={{ padding: "4px 8px", fontSize: "12px" }}>
-                Retry
-              </button>
-            </div>
-          )}
-          <div className="card" style={{ padding: 0, overflow: "hidden" }}>
-            {courseProgressLoading ? (
-              <div style={{ padding: "50px 20px", textAlign: "center" }}>
-                <div className="spinner" style={{ margin: "0 auto 16px" }}></div>
-                <p style={{ color: "var(--text-secondary)", fontSize: "14px" }}>Loading course progress metrics...</p>
-              </div>
-            ) : filteredCourseProgress.length === 0 ? (
-              <div style={{ padding: "50px 20px", textAlign: "center" }}>
-                <svg width="36" height="36" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ margin: "0 auto 12px", color: "var(--text-muted)" }}>
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-                </svg>
-                <h4 style={{ color: "var(--text-main)", fontSize: "15px", marginBottom: "4px" }}>No courses found</h4>
-                <p style={{ color: "var(--text-secondary)", fontSize: "13px" }}>
-                  {courseSearch
-                    ? "No courses matched your search criteria."
-                    : "No published curriculum courses have been assigned to learners yet."}
-                </p>
-              </div>
-            ) : (
-              <div className="table-responsive" style={{ overflowX: "auto" }}>
-                <table className="table" style={{ width: "100%", borderCollapse: "collapse", textAlign: "left" }}>
-                  <thead>
-                    <tr style={{ borderBottom: "1px solid var(--border-color)", background: "rgba(255,255,255,0.02)" }}>
-                      <th style={{ padding: "12px 18px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase" }}>Course</th>
-                      <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase" }}>Program</th>
-                      <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase" }}>Assigned Learners</th>
-                      <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase" }}>Completed</th>
-                      <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase" }}>In Progress</th>
-                      <th style={{ padding: "12px 16px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase" }}>Not Started</th>
-                      <th style={{ padding: "12px 18px", fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", textTransform: "uppercase" }}>Average Completion</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredCourseProgress.map((c) => (
-                      <tr key={c.course_id} style={{ borderBottom: "1px solid var(--border-color)" }}>
-                        <td style={{ padding: "12px 18px" }}>
-                          <span style={{ fontWeight: "600", fontSize: "13px", color: "var(--text-main)" }}>
-                            {c.course_name}
-                          </span>
-                        </td>
-                        <td style={{ padding: "12px 16px", fontSize: "13px", color: "var(--text-secondary)" }}>
-                          {c.program_name || "-"}
-                        </td>
-                        <td style={{ padding: "12px 16px" }}>
-                          <span style={{ fontWeight: "600", color: "var(--text-main)" }}>
-                            {c.assigned_learners_count}
-                          </span>
-                        </td>
-                        <td style={{ padding: "12px 16px" }}>
-                          <span style={{ color: "var(--status-success)", fontWeight: "600" }}>
-                            {c.completed_learners_count}
-                          </span>
-                        </td>
-                        <td style={{ padding: "12px 16px" }}>
-                          <span style={{ color: "#38bdf8", fontWeight: "600" }}>
-                            {c.in_progress_learners_count}
-                          </span>
-                        </td>
-                        <td style={{ padding: "12px 16px", color: "var(--text-muted)" }}>
-                          {c.not_started_learners_count}
-                        </td>
-                        <td style={{ padding: "12px 18px" }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                            <div style={{ flex: 1, backgroundColor: "var(--bg-main)", height: "8px", borderRadius: "4px", overflow: "hidden", minWidth: "80px" }}>
-                              <div
-                                style={{
-                                  width: `${Math.min(100, Math.max(0, c.average_completion_percentage))}%`,
-                                  backgroundColor: c.average_completion_percentage === 100 ? "var(--status-success)" : "var(--accent-primary)",
-                                  height: "100%",
-                                }}
-                              />
-                            </div>
-                            <span style={{ fontSize: "12px", fontWeight: "700", minWidth: "40px" }}>
-                              {c.average_completion_percentage}%
-                            </span>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
         </div>
       )}
     </div>

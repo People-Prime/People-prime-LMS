@@ -287,7 +287,8 @@ export default function TrainerLearnersTab({ initialSelectedLearnerId, onClearSe
                         <th>Module Name</th>
                         <th>Course / Program</th>
                         <th>Required Questions</th>
-                        <th>Answered Questions</th>
+                        <th>Marks / Score</th>
+                        <th>Assessment Result</th>
                         <th>Completion Status</th>
                       </tr>
                     </thead>
@@ -304,13 +305,32 @@ export default function TrainerLearnersTab({ initialSelectedLearnerId, onClearSe
                             <span className="badge badge-purple">{m.total_required_questions} Required</span>
                           </td>
                           <td>
-                            {m.answered_required_questions} answered
+                            {m.is_tested_module && m.marks_obtained !== null && m.marks_obtained !== undefined ? (
+                              <span style={{ fontWeight: "700", color: "var(--accent-primary)" }}>
+                                {m.marks_obtained} / {m.total_marks || 5}
+                              </span>
+                            ) : (
+                              <span>{m.answered_required_questions} answered</span>
+                            )}
+                          </td>
+                          <td>
+                            {m.is_tested_module ? (
+                              m.result === "PASS" ? (
+                                <span className="badge badge-success" style={{ fontWeight: "700" }}>PASS</span>
+                              ) : m.result === "FAIL" ? (
+                                <span className="badge badge-error" style={{ fontWeight: "700" }}>FAIL</span>
+                              ) : (
+                                <span className="badge badge-info">—</span>
+                              )
+                            ) : (
+                              <span style={{ color: "var(--text-muted)" }}>—</span>
+                            )}
                           </td>
                           <td>
                             {m.is_completed ? (
                               <span className="badge badge-success">COMPLETED</span>
                             ) : (
-                              <span className="badge badge-warning">INCOMPLETE</span>
+                              <span className="badge badge-warning">NOT COMPLETED</span>
                             )}
                           </td>
                         </tr>

@@ -38,7 +38,7 @@ export default function LearnerPortal() {
             ? "Learner Dashboard"
             : activeTab === "mycourses"
             ? "My Learning"
-            : "My Learning Reports"}
+            : "My Progress Reports"}
         </h1>
         <p className="dashboard-subtitle">
           {isAdminPreview
@@ -47,7 +47,7 @@ export default function LearnerPortal() {
             ? `Welcome back, ${learnerDisplayName}! Keep up the momentum and continue your training journey.`
             : activeTab === "mycourses"
             ? `Welcome back, ${learnerDisplayName}. View your assigned courses and modules.`
-            : `Welcome back, ${learnerDisplayName}. Inspect your personal course progress, module completion, and evaluation records.`}
+            : `Welcome back, ${learnerDisplayName}. Track your personal course progress, module completion, and assessment results.`}
         </p>
       </div>
 

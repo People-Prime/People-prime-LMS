@@ -96,7 +96,6 @@ class DocxPreviewRoleSecurityTests(TestCase):
         self.pub_module = Module.objects.create(
             course=self.pub_course,
             name="Published Module",
-            code="PUB-M1",
             status=PublicationStatus.PUBLISHED,
         )
         self.pub_submodule = Submodule.objects.create(
@@ -135,7 +134,6 @@ class DocxPreviewRoleSecurityTests(TestCase):
         self.draft_module = Module.objects.create(
             course=self.draft_course,
             name="Draft Module",
-            code="DFT-M1",
             status=PublicationStatus.DRAFT,
         )
         self.draft_submodule = Submodule.objects.create(

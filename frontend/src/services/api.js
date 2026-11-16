@@ -223,14 +223,16 @@ export async function apiClient(endpoint, options = {}) {
 }
 
 /**
- * Returns the full backend download URL for a given training file ID.
- * Uses API_BASE_URL so it properly directs to the API endpoint.
+ * Returns the download/preview URL for a given training file ID.
+ * Returns a relative URL so that requests in the browser stay on the same origin
+ * (navigating via Vite proxy or reverse proxy), preventing X-Frame-Options SAMEORIGIN
+ * blocking and cross-origin connection refusals.
  * @param {number|string} fileId
  * @returns {string}
  */
 export function getTrainingFileDownloadUrl(fileId) {
   if (!fileId) return "";
-  return `${API_BASE_URL}/admin/training-files/${fileId}/download/`;
+  return `/api/admin/training-files/${fileId}/download/`;
 }
 
 export { API_BASE_URL, APIError };

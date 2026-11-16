@@ -10,8 +10,12 @@ import MaterialRepositoryView from "./courses/MaterialRepositoryView";
 import MaterialMappingModal from "./courses/MaterialMappingModal";
 import CourseDeleteModal from "./courses/CourseDeleteModal";
 import ModuleDeleteModal from "./courses/ModuleDeleteModal";
+import LevelDeleteModal from "./courses/LevelDeleteModal";
+import ModuleInsertModal from "./courses/ModuleInsertModal";
+import ModuleUploadModal from "./courses/ModuleUploadModal";
 import CoursePreviewModal from "./courses/CoursePreviewModal";
 import CoursePublishModal from "./courses/CoursePublishModal";
+import ConfirmActionModal from "./courses/ConfirmActionModal";
 
 export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorkspaceTabChange = null }) {
   // Navigation State
@@ -67,6 +71,18 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
   const [moduleDeletionImpact, setModuleDeletionImpact] = useState(null);
   const [loadingModuleDeletionImpact, setLoadingModuleDeletionImpact] = useState(false);
 
+  // Level Deletion Modal State
+  const [showDeleteLevelModal, setShowDeleteLevelModal] = useState(false);
+  const [levelToDelete, setLevelToDelete] = useState(null);
+
+  // Module Insert Modal State
+  const [showInsertModuleModal, setShowInsertModuleModal] = useState(false);
+  const [insertModalConfig, setInsertModalConfig] = useState({ course: null, level: null, levelModules: [] });
+
+  // Module Upload Modal State
+  const [showUploadModuleModal, setShowUploadModuleModal] = useState(false);
+  const [uploadTargetModule, setUploadTargetModule] = useState(null);
+
   // Course Preview Modal State
   const [showPreviewModal, setShowPreviewModal] = useState(false);
   const [courseToPreview, setCourseToPreview] = useState(null);
@@ -85,10 +101,9 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
   const [moduleCourseId, setModuleCourseId] = useState("");
   const [moduleLevelId, setModuleLevelId] = useState("");
   const [moduleName, setModuleName] = useState("");
-  const [moduleCode, setModuleCode] = useState("");
   const [moduleDescription, setModuleDescription] = useState("");
   const [moduleOrder, setModuleOrder] = useState(1);
-  const [moduleDuration, setModuleDuration] = useState(30);
+  const [moduleDuration, setModuleDuration] = useState("");
   const [moduleStatus, setModuleStatus] = useState("DRAFT");
 
   // CourseLevel Management Modal State
@@ -98,6 +113,18 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
   const [levelName, setLevelName] = useState("");
   const [levelOrder, setLevelOrder] = useState(1);
   const [levelDescription, setLevelDescription] = useState("");
+
+  // Confirmation Modal State
+  const [confirmConfig, setConfirmConfig] = useState({
+    show: false,
+    title: "",
+    message: "",
+    affectedItem: null,
+    confirmLabel: "Confirm",
+    cancelLabel: "Cancel",
+    isDanger: false,
+    onConfirm: null,
+  });
   const [activeModule, setActiveModule] = useState(null);
   const [moduleSubTab, setModuleSubTab] = useState("submodules"); // 'submodules' | 'questions'
   const [activeSubmodules, setActiveSubmodules] = useState([]);
@@ -443,15 +470,20 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
   // ---------------------------------------------------------------------------
   // Module CRUD Handlers
   // ---------------------------------------------------------------------------
-  const handleOpenCreateModuleModal = (preselectedCourseId) => {
+  const handleOpenCreateModuleModal = (preselectedCourseId, preselectedLevelId = "") => {
     setEditingModuleId(null);
-    setModuleCourseId(preselectedCourseId ? String(preselectedCourseId) : (selectedCourse ? String(selectedCourse.id) : ""));
-    setModuleLevelId("");
+    setModuleCourseId(
+      preselectedCourseId !== undefined && preselectedCourseId !== null
+        ? String(preselectedCourseId)
+        : selectedCourse
+        ? String(selectedCourse.id)
+        : ""
+    );
+    setModuleLevelId(preselectedLevelId ? String(preselectedLevelId) : "");
     setModuleName("");
-    setModuleCode("");
     setModuleDescription("");
     setModuleOrder(modules.length + 1);
-    setModuleDuration(30);
+    setModuleDuration("");
     setModuleStatus("DRAFT");
     setError(null);
     setShowModuleModal(true);
@@ -459,40 +491,41 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
 
   const handleOpenEditModuleModal = (module) => {
     setEditingModuleId(module.id);
-    setModuleCourseId(String(module.course));
-    setModuleLevelId(module.level ? String(module.level) : "");
+    setModuleCourseId(module.course !== null && module.course !== undefined ? String(module.course) : "");
+    setModuleLevelId(module.level !== null && module.level !== undefined ? String(module.level) : "");
     setModuleName(module.name);
-    setModuleCode(module.code);
     setModuleDescription(module.description || "");
     setModuleOrder(module.order ?? 1);
-    setModuleDuration(module.estimated_duration_minutes ?? 30);
+    setModuleDuration(
+      module.estimated_duration_minutes !== null && module.estimated_duration_minutes !== undefined && module.estimated_duration_minutes > 0
+        ? String(module.estimated_duration_minutes)
+        : ""
+    );
     setModuleStatus(module.status || "DRAFT");
     setError(null);
     setShowModuleModal(true);
   };
 
   const handleDuplicateModule = async (module) => {
-    const courseModules = modules.filter((m) => m.course === module.course);
+    const scopeModules = module.course
+      ? modules.filter((m) => m.course === module.course)
+      : modules.filter((m) => m.level === module.level);
     const defaultCopyName = `${module.name} (Copy)`;
-    const defaultCopyCode = `${module.code}-C`.slice(0, 50);
 
     const inputName = window.prompt("Enter name for duplicated module:", defaultCopyName);
     if (!inputName || !inputName.trim()) return;
-
-    const inputCode = window.prompt("Enter unique code for duplicated module:", defaultCopyCode);
-    if (!inputCode || !inputCode.trim()) return;
 
     setSubmitting(true);
     setError(null);
     setSuccessMessage("");
 
     const payload = {
-      course: module.course,
+      course: module.course ?? null,
+      level: module.level ?? null,
       name: inputName.trim(),
-      code: inputCode.trim().toUpperCase(),
       description: module.description || "",
-      order: courseModules.length + 1,
-      estimated_duration_minutes: module.estimated_duration_minutes || 30,
+      order: scopeModules.length + 1,
+      estimated_duration_minutes: module.estimated_duration_minutes || 0,
       status: "DRAFT", // Always draft
     };
 
@@ -512,143 +545,369 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
 
   const handleSaveModule = async (e) => {
     e.preventDefault();
-    if (!moduleName.trim() || !moduleCode.trim() || !moduleCourseId) {
-      setError("Module Name, Code, and Parent Course are required.");
+    if (!moduleName.trim()) {
+      setError("Module Name is required.");
+      return;
+    }
+    if (!moduleLevelId) {
+      setError("A Course Level is required for every module.");
       return;
     }
 
-    setSubmitting(true);
-    setError(null);
-    setSuccessMessage("");
+    const parsedDuration =
+      moduleDuration === "" || moduleDuration === null || moduleDuration === undefined
+        ? 0
+        : parseInt(moduleDuration, 10);
 
     const payload = {
-      course: parseInt(moduleCourseId, 10),
-      level: moduleLevelId ? parseInt(moduleLevelId, 10) : null,
+      course: moduleCourseId ? parseInt(moduleCourseId, 10) : null,
+      level: parseInt(moduleLevelId, 10),
       name: moduleName.trim(),
-      code: moduleCode.trim().toUpperCase(),
       description: moduleDescription.trim(),
       order: parseInt(moduleOrder, 10) || 1,
-      estimated_duration_minutes: parseInt(moduleDuration, 10) || 30,
+      estimated_duration_minutes: isNaN(parsedDuration) ? 0 : Math.max(0, parsedDuration),
       status: moduleStatus,
     };
 
-    try {
-      if (editingModuleId) {
-        await apiClient(`/modules/${editingModuleId}/`, {
-          method: "PATCH",
-          body: payload,
-        });
-        setSuccessMessage("Module updated successfully.");
-      } else {
-        await apiClient("/modules/", {
-          method: "POST",
-          body: payload,
-        });
-        setSuccessMessage("Module created successfully.");
-      }
-      setShowModuleModal(false);
-      await loadData();
-    } catch (err) {
-      setError(err.message || "Failed to save module.");
-    } finally {
-      setSubmitting(false);
-    }
+    const isEditing = Boolean(editingModuleId);
+    const targetLevelObj = courseLevels.find((lvl) => String(lvl.id) === String(moduleLevelId));
+
+    setConfirmConfig({
+      show: true,
+      title: isEditing ? "Confirm Module Update" : "Confirm Module Creation",
+      message: isEditing
+        ? `Are you sure you want to save changes to this module? Its details and curriculum placement will be updated.`
+        : `Are you sure you want to create this new module under ${targetLevelObj?.name || "the selected level"}?`,
+      affectedItem: `${moduleName.trim()} (${targetLevelObj?.name || "Level " + moduleLevelId})`,
+      confirmLabel: isEditing ? "Save Changes" : "Create Module",
+      cancelLabel: "Cancel",
+      isDanger: false,
+      onConfirm: async () => {
+        setSubmitting(true);
+        setError(null);
+        setSuccessMessage("");
+        try {
+          if (editingModuleId) {
+            await apiClient(`/modules/${editingModuleId}/`, {
+              method: "PATCH",
+              body: payload,
+            });
+            setSuccessMessage("Module updated successfully.");
+          } else {
+            await apiClient("/modules/", {
+              method: "POST",
+              body: payload,
+            });
+            setSuccessMessage("Module created successfully.");
+          }
+          setShowModuleModal(false);
+          setConfirmConfig((prev) => ({ ...prev, show: false }));
+          await loadData();
+        } catch (err) {
+          setError(err.message || "Failed to save module.");
+          setConfirmConfig((prev) => ({ ...prev, show: false }));
+        } finally {
+          setSubmitting(false);
+        }
+      },
+    });
   };
 
   // ---------------------------------------------------------------------------
   // Quick Module Level Assignment / Reassignment Handler
   // ---------------------------------------------------------------------------
-  const handleAssignModuleLevel = async (moduleId, targetLevelId) => {
-    try {
-      setError(null);
-      await apiClient(`/modules/${moduleId}/`, {
-        method: "PATCH",
-        body: { level: targetLevelId ? parseInt(targetLevelId, 10) : null },
-      });
-      setSuccessMessage(
-        targetLevelId ? "Module assigned to level successfully." : "Module unassigned from level."
-      );
-      await loadData();
-    } catch (err) {
-      setError(err.message || "Failed to update module level assignment.");
-    }
+  const handleAssignModuleLevel = (moduleId, targetLevelId) => {
+    const targetMod = modules.find((m) => m.id === moduleId);
+    const targetLvl = courseLevels.find((lvl) => String(lvl.id) === String(targetLevelId));
+    const targetLevelName = targetLvl ? targetLvl.name : (targetLevelId ? `Level ${targetLevelId}` : "Unassigned");
+
+    setConfirmConfig({
+      show: true,
+      title: "Confirm Level Assignment",
+      message: targetLevelId
+        ? `Are you sure you want to change the Level Assignment for this module to "${targetLevelName}"? This will update its curriculum placement.`
+        : `Are you sure you want to unassign this module from its current level?`,
+      affectedItem: targetMod ? `${targetMod.name} → ${targetLevelName}` : `Module #${moduleId}`,
+      confirmLabel: "Confirm Assignment",
+      cancelLabel: "Cancel",
+      isDanger: false,
+      onConfirm: async () => {
+        setSubmitting(true);
+        setError(null);
+        try {
+          await apiClient(`/modules/${moduleId}/`, {
+            method: "PATCH",
+            body: { level: targetLevelId ? parseInt(targetLevelId, 10) : null },
+          });
+          setSuccessMessage(
+            targetLevelId ? "Module assigned to level successfully." : "Module unassigned from level."
+          );
+          setConfirmConfig((prev) => ({ ...prev, show: false }));
+          await loadData();
+        } catch (err) {
+          setError(err.message || "Failed to update module level assignment.");
+          setConfirmConfig((prev) => ({ ...prev, show: false }));
+        } finally {
+          setSubmitting(false);
+        }
+      },
+    });
   };
 
   // ---------------------------------------------------------------------------
   // CourseLevel Management Handlers
   // ---------------------------------------------------------------------------
-  const handleOpenCreateLevelModal = (courseId) => {
+  const handleOpenCreateLevelModal = () => {
     setEditingLevelId(null);
-    setLevelCourseId(courseId ? String(courseId) : (selectedCourse ? String(selectedCourse.id) : ""));
-    const courseLvs = courseLevels.filter((l) => l.course === (courseId || selectedCourse?.id));
-    setLevelName(`Level ${courseLvs.length + 1}`);
-    setLevelOrder(courseLvs.length + 1);
+    setLevelCourseId(selectedCourse ? String(selectedCourse.id) : "");
+    setLevelName(`Level ${courseLevels.length + 1}`);
+    setLevelOrder(courseLevels.length + 1);
     setLevelDescription("");
+    setError(null);
+    setShowLevelModal(true);
+  };
+
+  const handleOpenEditLevelModal = (level) => {
+    setEditingLevelId(level.id);
+    setLevelCourseId(level.course !== null && level.course !== undefined ? String(level.course) : "");
+    setLevelName(level.name);
+    setLevelOrder(level.order ?? 1);
+    setLevelDescription(level.description || "");
     setError(null);
     setShowLevelModal(true);
   };
 
   const handleSaveLevel = async (e) => {
     e.preventDefault();
-    if (!levelName.trim() || !levelCourseId) {
-      setError("Level Name and Course are required.");
+    const trimmedName = levelName.trim();
+    if (!trimmedName) {
+      setError("Level Name is required.");
       return;
     }
 
-    setSubmitting(true);
-    setError(null);
-    setSuccessMessage("");
+    // Check duplicate level name (case-insensitive after trimming), excluding current editing level
+    const isEditing = Boolean(editingLevelId);
+    const isDuplicateName = courseLevels.some((lvl) => {
+      if (isEditing && lvl.id === editingLevelId) return false;
+      return (lvl.name || "").trim().toLowerCase() === trimmedName.toLowerCase();
+    });
 
+    if (isDuplicateName) {
+      setError("A level with this name already exists.");
+      return;
+    }
+
+    const orderNum = parseInt(levelOrder, 10);
+    if (isNaN(orderNum) || orderNum <= 0) {
+      setError("Sequence Order must be a valid positive number.");
+      return;
+    }
+
+    const isDuplicateOrder = courseLevels.some((lvl) => {
+      if (isEditing && lvl.id === editingLevelId) return false;
+      return lvl.order === orderNum;
+    });
+
+    if (isDuplicateOrder) {
+      setError("A level with this sequence order already exists.");
+      return;
+    }
+
+    const targetCourseId = levelCourseId ? parseInt(levelCourseId, 10) : null;
     const payload = {
-      course: parseInt(levelCourseId, 10),
-      name: levelName.trim(),
-      order: parseInt(levelOrder, 10) || 1,
+      course: targetCourseId,
+      name: trimmedName,
+      order: orderNum,
       description: levelDescription.trim(),
     };
 
+    setConfirmConfig({
+      show: true,
+      title: isEditing ? "Confirm Level Update" : "Confirm Level Creation",
+      message: isEditing
+        ? `Are you sure you want to update this level? Name: "${payload.name}", Sequence Order: ${payload.order}${payload.description ? `, Description: "${payload.description}"` : ""}.`
+        : `Are you sure you want to create "${payload.name}" at sequence order ${payload.order}?`,
+      affectedItem: `${payload.name} (Tier #${payload.order})`,
+      confirmLabel: isEditing ? "Save Changes" : "Create Level",
+      cancelLabel: "Cancel",
+      isDanger: false,
+      onConfirm: async () => {
+        setSubmitting(true);
+        setError(null);
+        setSuccessMessage("");
+        try {
+          if (editingLevelId) {
+            await apiClient(`/course-levels/${editingLevelId}/`, {
+              method: "PATCH",
+              body: payload,
+            });
+            setSuccessMessage(`Level "${payload.name}" updated successfully.`);
+          } else {
+            await apiClient("/course-levels/", {
+              method: "POST",
+              body: payload,
+            });
+            setSuccessMessage(`Level "${payload.name}" created successfully.`);
+          }
+          setShowLevelModal(false);
+          setConfirmConfig((prev) => ({ ...prev, show: false }));
+          await loadData();
+        } catch (err) {
+          setError(err.message || "Failed to save course level.");
+          setConfirmConfig((prev) => ({ ...prev, show: false }));
+        } finally {
+          setSubmitting(false);
+        }
+      },
+    });
+  };
+
+  const handleDeleteLevel = (level) => {
+    setLevelToDelete(level);
+    setShowDeleteLevelModal(true);
+    setError(null);
+  };
+
+  const handleConfirmDeleteLevel = async () => {
+    if (!levelToDelete) return;
+    setSubmitting(true);
+    setError(null);
     try {
-      if (editingLevelId) {
-        await apiClient(`/course-levels/${editingLevelId}/`, {
-          method: "PATCH",
-          body: payload,
-        });
-        setSuccessMessage("Level updated successfully.");
-      } else {
-        await apiClient("/course-levels/", {
-          method: "POST",
-          body: payload,
-        });
-        setSuccessMessage(`Level "${levelName}" created successfully.`);
-      }
-      setShowLevelModal(false);
+      await apiClient(`/course-levels/${levelToDelete.id}/`, {
+        method: "DELETE",
+      });
+      setSuccessMessage(`Level "${levelToDelete.name}" and all associated modules and records permanently deleted.`);
+      setShowDeleteLevelModal(false);
+      setLevelToDelete(null);
       await loadData();
     } catch (err) {
-      setError(err.message || "Failed to save course level.");
+      setError(err.message || "Failed to delete level.");
     } finally {
       setSubmitting(false);
     }
   };
 
-  const handleDeleteLevel = async (level) => {
-    if (level.modules_count > 0) {
-      window.alert(`Cannot delete "${level.name}" because it contains ${level.modules_count} module(s). Reassign or unassign all modules before deleting.`);
-      return;
-    }
+  // ---------------------------------------------------------------------------
+  // Module Insert, Reorder, and Content Upload Handlers
+  // ---------------------------------------------------------------------------
+  const handleOpenInsertModuleModal = ({ course, level, levelModules }) => {
+    setInsertModalConfig({ course, level, levelModules: levelModules || [] });
+    setShowInsertModuleModal(true);
+  };
 
-    if (!window.confirm(`Are you sure you want to delete empty level "${level.name}"?`)) {
-      return;
-    }
+  const handleInsertModule = (insertData) => {
+    const targetLvl = courseLevels.find((lvl) => String(lvl.id) === String(insertData.level));
+    setConfirmConfig({
+      show: true,
+      title: "Confirm Insert Module",
+      message: `Are you sure you want to insert "${insertData.name}" into ${targetLvl?.name || "Level"} at position (${insertData.position})? Existing modules will be re-sequenced automatically.`,
+      affectedItem: `${insertData.name} → ${targetLvl?.name || "Level"}`,
+      confirmLabel: "Insert Module",
+      cancelLabel: "Cancel",
+      isDanger: false,
+      onConfirm: async () => {
+        setSubmitting(true);
+        setError(null);
+        try {
+          const res = await apiClient("/modules/insert/", {
+            method: "POST",
+            body: insertData,
+          });
+          setSuccessMessage(`Module "${res?.name || insertData.name}" inserted successfully at position ${res?.order || ""}.`);
+          setShowInsertModuleModal(false);
+          setConfirmConfig((prev) => ({ ...prev, show: false }));
+          await loadData();
+        } catch (err) {
+          setError(err.message || "Failed to insert module.");
+          setConfirmConfig((prev) => ({ ...prev, show: false }));
+        } finally {
+          setSubmitting(false);
+        }
+      },
+    });
+  };
 
-    try {
-      setError(null);
-      await apiClient(`/course-levels/${level.id}/`, {
-        method: "DELETE",
-      });
-      setSuccessMessage(`Level "${level.name}" deleted successfully.`);
-      await loadData();
-    } catch (err) {
-      setError(err.message || "Failed to delete level.");
-    }
+  const handleReorderModules = (levelId, moduleIds) => {
+    const targetLvl = courseLevels.find((lvl) => String(lvl.id) === String(levelId));
+    setConfirmConfig({
+      show: true,
+      title: "Confirm Module Reorder",
+      message: `Are you sure you want to change the display order of modules in ${targetLvl?.name || "this level"}?`,
+      affectedItem: `${targetLvl?.name || "Level " + levelId} (${moduleIds.length} modules)`,
+      confirmLabel: "Reorder Modules",
+      cancelLabel: "Cancel",
+      isDanger: false,
+      onConfirm: async () => {
+        setSubmitting(true);
+        setError(null);
+        try {
+          await apiClient("/modules/reorder/", {
+            method: "POST",
+            body: { level_id: levelId, module_ids: moduleIds },
+          });
+          setSuccessMessage("Modules reordered successfully.");
+          setConfirmConfig((prev) => ({ ...prev, show: false }));
+          await loadData();
+        } catch (err) {
+          setError(err.message || "Failed to reorder modules.");
+          setConfirmConfig((prev) => ({ ...prev, show: false }));
+        } finally {
+          setSubmitting(false);
+        }
+      },
+    });
+  };
+
+  const handleOpenUploadModuleModal = (module) => {
+    setUploadTargetModule(module);
+    setShowUploadModuleModal(true);
+  };
+
+  const handleUploadModuleContent = (moduleId, formData) => {
+    const targetMod = modules.find((m) => m.id === moduleId);
+    const fileName = formData.get("file")?.name || "Document";
+    setConfirmConfig({
+      show: true,
+      title: "Confirm Module Document Upload",
+      message: `Are you sure you want to upload "${fileName}" to module "${targetMod?.name || moduleId}"? This will attach the learning material to the curriculum.`,
+      affectedItem: `${targetMod?.name || "Module " + moduleId} ← ${fileName}`,
+      confirmLabel: "Upload Document",
+      cancelLabel: "Cancel",
+      isDanger: false,
+      onConfirm: async () => {
+        setSubmitting(true);
+        setError(null);
+        try {
+          // Direct multipart upload using fetch with session token
+          const token = localStorage.getItem("accessToken") || "";
+          const headers = {};
+          if (token) {
+            headers["Authorization"] = `Bearer ${token}`;
+          }
+          const response = await fetch(`/api/modules/${moduleId}/upload-content/`, {
+            method: "POST",
+            headers,
+            body: formData,
+          });
+
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || errorData.detail || `Upload failed with status ${response.status}`);
+          }
+
+          setSuccessMessage("Learning material uploaded directly to module successfully.");
+          setShowUploadModuleModal(false);
+          setUploadTargetModule(null);
+          setConfirmConfig((prev) => ({ ...prev, show: false }));
+          await loadData();
+        } catch (err) {
+          setError(err.message || "Failed to upload module content.");
+          setConfirmConfig((prev) => ({ ...prev, show: false }));
+        } finally {
+          setSubmitting(false);
+        }
+      },
+    });
   };
 
   const handleDeleteModule = (module) => {
@@ -670,7 +929,6 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
         setModuleDeletionImpact({
           module_id: module.id,
           name: module.name,
-          code: module.code,
           status: module.status,
           course_id: module.course,
           course_name: selectedCourse?.name || "Current Course",
@@ -1158,7 +1416,7 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
       ) : (
         <>
           {/* LEVEL 1: Level-First View (Default when no course is selected and not in global repository) */}
-          {!selectedCourse && workspaceTab !== "repository" && (
+          {!selectedCourse && workspaceTab !== "repository" && !activeModule && (
             <CourseLevelsFirstView
               courses={courses}
               courseLevels={courseLevels}
@@ -1168,9 +1426,13 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
               onOpenGlobalRepository={handleOpenGlobalRepository}
               onOpenCreateCourseModal={handleOpenCreateCourseModal}
               onOpenCreateLevelModal={handleOpenCreateLevelModal}
+              onOpenEditLevelModal={handleOpenEditLevelModal}
               onDeleteLevel={handleDeleteLevel}
               onAssignModuleLevel={handleAssignModuleLevel}
               onOpenCreateModuleModal={handleOpenCreateModuleModal}
+              onOpenInsertModuleModal={handleOpenInsertModuleModal}
+              onOpenUploadModuleModal={handleOpenUploadModuleModal}
+              onReorderModules={handleReorderModules}
               onOpenEditModuleModal={handleOpenEditModuleModal}
               onDeleteModule={handleDeleteModule}
               onDuplicateModule={handleDuplicateModule}
@@ -1208,12 +1470,13 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
             </div>
           )}
 
-          {/* LEVEL 2: Selected Course Workspace Views */}
-          {selectedCourse && workspaceTab === "curriculum" && (
+          {/* LEVEL 2: Selected Course Workspace Views (or Active Course-less Module Content View) */}
+          {(selectedCourse || activeModule) && workspaceTab === "curriculum" && (
             <CourseCurriculumView
               selectedCourse={selectedCourse}
               courseLevels={courseLevels}
               onOpenCreateLevelModal={handleOpenCreateLevelModal}
+              onOpenEditLevelModal={handleOpenEditLevelModal}
               onDeleteLevel={handleDeleteLevel}
               onAssignModuleLevel={handleAssignModuleLevel}
               modules={modules}
@@ -1246,7 +1509,6 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
                 handleOpenAttachModal({
                   initialSubmodule: sub,
                   initialModule: activeModule,
-                  initialCluster: clusters.find((c) => c.course === selectedCourse.id),
                 })
               }
               onMappingDeleted={handleMappingDeleted}
@@ -1377,50 +1639,135 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
 
       {/* Module Modal */}
       {showModuleModal && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal-container" style={{ maxWidth: "500px", width: "100%" }}>
-            <div className="modal-header">
-              <h3 className="modal-title">{editingModuleId ? "Edit Module" : "Create New Module"}</h3>
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "rgba(0, 0, 0, 0.6)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1100,
+            padding: "20px",
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !submitting) {
+              setShowModuleModal(false);
+            }
+          }}
+        >
+          <div
+            className="modal-container"
+            style={{
+              backgroundColor: "var(--bg-card, #ffffff)",
+              borderRadius: "8px",
+              boxShadow: "0 10px 30px rgba(0, 0, 0, 0.25)",
+              maxWidth: "680px",
+              width: "100%",
+              maxHeight: "90vh",
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+              border: "1px solid var(--border-color)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              className="modal-header"
+              style={{
+                padding: "16px 20px",
+                borderBottom: "1px solid var(--border-color)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                backgroundColor: "var(--bg-surface)",
+                flexShrink: 0,
+              }}
+            >
+              <h3 className="modal-title" style={{ margin: 0, fontSize: "17px", fontWeight: "700", color: "var(--text-main)" }}>
+                {editingModuleId ? "Edit Module" : "Create New Module"}
+              </h3>
               <button
                 type="button"
                 className="modal-close-btn"
                 onClick={() => setShowModuleModal(false)}
                 disabled={submitting}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  fontSize: "20px",
+                  cursor: submitting ? "not-allowed" : "pointer",
+                  color: "var(--text-secondary)",
+                  padding: "4px 8px",
+                  lineHeight: 1,
+                }}
               >
                 &times;
               </button>
             </div>
-            <form onSubmit={handleSaveModule}>
-              <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-                <div className="form-group">
-                  <label className="form-label">Parent Course <span style={{ color: "var(--status-error)" }}>*</span></label>
-                  <select
-                    className="form-input"
-                    value={moduleCourseId}
-                    onChange={(e) => setModuleCourseId(e.target.value)}
-                    required
+            <form onSubmit={handleSaveModule} style={{ display: "flex", flexDirection: "column", overflow: "hidden", flex: 1, margin: 0 }}>
+              <div
+                className="modal-body"
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "14px",
+                  overflowY: "auto",
+                  padding: "20px",
+                  flex: 1,
+                }}
+              >
+                {error && (
+                  <div
+                    className="alert alert-error"
+                    style={{
+                      marginBottom: "6px",
+                      padding: "10px 12px",
+                      borderRadius: "6px",
+                      fontSize: "13px",
+                      backgroundColor: "rgba(239, 68, 68, 0.1)",
+                      color: "var(--status-error, #b91c1c)",
+                      border: "1px solid rgba(239, 68, 68, 0.3)",
+                    }}
                   >
-                    <option value="">-- Select Parent Course --</option>
-                    {courses.map((c) => (
-                      <option key={c.id} value={c.id}>{c.name} ({c.code})</option>
-                    ))}
-                  </select>
-                </div>
+                    {error}
+                  </div>
+                )}
                 <div className="form-group">
-                  <label className="form-label">Course Level (Optional)</label>
+                  <label className="form-label">Course Level <span style={{ color: "var(--status-error)" }}>*</span></label>
                   <select
                     className="form-input"
                     value={moduleLevelId}
                     onChange={(e) => setModuleLevelId(e.target.value)}
+                    required
                   >
-                    <option value="">-- No Level (Unassigned) --</option>
+                    <option value="">-- Select Course Level --</option>
                     {courseLevels
-                      .filter((lvl) => !moduleCourseId || lvl.course === parseInt(moduleCourseId, 10))
+                      .filter((lvl) => !moduleCourseId || !lvl.course || lvl.course === parseInt(moduleCourseId, 10))
                       .map((lvl) => (
                         <option key={lvl.id} value={lvl.id}>
                           {lvl.name} (Sequence #{lvl.order})
                         </option>
                       ))}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Parent Course (Optional)</label>
+                  <select
+                    className="form-input"
+                    value={moduleCourseId}
+                    onChange={(e) => setModuleCourseId(e.target.value)}
+                  >
+                    <option value="">-- No Parent Course (Independent Level Module) --</option>
+                    {courses.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name} ({c.code})</option>
+                    ))}
                   </select>
                 </div>
                 <div className="form-group">
@@ -1434,20 +1781,10 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
                   />
                 </div>
                 <div className="form-group">
-                  <label className="form-label">Module Code <span style={{ color: "var(--status-error)" }}>*</span></label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    value={moduleCode}
-                    onChange={(e) => setModuleCode(e.target.value)}
-                    required
-                  />
-                </div>
-                <div className="form-group">
                   <label className="form-label">Description</label>
                   <textarea
                     className="form-input"
-                    rows="2"
+                    rows="3"
                     value={moduleDescription}
                     onChange={(e) => setModuleDescription(e.target.value)}
                   />
@@ -1464,13 +1801,14 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
                     />
                   </div>
                   <div className="form-group">
-                    <label className="form-label">Duration (min)</label>
+                    <label className="form-label">Duration (min, optional)</label>
                     <input
                       type="number"
                       className="form-input"
+                      placeholder="e.g. 30 (optional)"
                       value={moduleDuration}
                       onChange={(e) => setModuleDuration(e.target.value)}
-                      min="1"
+                      min="0"
                     />
                   </div>
                 </div>
@@ -1487,7 +1825,18 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
                   </select>
                 </div>
               </div>
-              <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "10px" }}>
+              <div
+                className="modal-footer"
+                style={{
+                  display: "flex",
+                  justifyContent: "flex-end",
+                  gap: "10px",
+                  padding: "14px 20px",
+                  borderTop: "1px solid var(--border-color)",
+                  backgroundColor: "var(--bg-surface)",
+                  flexShrink: 0,
+                }}
+              >
                 <button
                   type="button"
                   className="btn btn-secondary"
@@ -1507,35 +1856,106 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
 
       {/* CourseLevel Modal */}
       {showLevelModal && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true">
-          <div className="modal-container" style={{ maxWidth: "480px", width: "100%" }}>
-            <div className="modal-header">
-              <h3 className="modal-title">{editingLevelId ? "Edit Level" : "Create New Level"}</h3>
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "rgba(0, 0, 0, 0.6)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1100,
+            padding: "20px",
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !submitting) {
+              setShowLevelModal(false);
+            }
+          }}
+        >
+          <div
+            className="modal-container"
+            style={{
+              backgroundColor: "var(--bg-card, #ffffff)",
+              borderRadius: "8px",
+              boxShadow: "0 10px 30px rgba(0, 0, 0, 0.25)",
+              maxWidth: "600px",
+              width: "100%",
+              maxHeight: "90vh",
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+              border: "1px solid var(--border-color)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              className="modal-header"
+              style={{
+                padding: "16px 20px",
+                borderBottom: "1px solid var(--border-color)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                backgroundColor: "var(--bg-surface)",
+                flexShrink: 0,
+              }}
+            >
+              <h3 className="modal-title" style={{ margin: 0, fontSize: "17px", fontWeight: "700", color: "var(--text-main)" }}>
+                {editingLevelId ? "Edit Level" : "Create New Level"}
+              </h3>
               <button
                 type="button"
                 className="modal-close-btn"
                 onClick={() => setShowLevelModal(false)}
                 disabled={submitting}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  fontSize: "20px",
+                  cursor: submitting ? "not-allowed" : "pointer",
+                  color: "var(--text-secondary)",
+                  padding: "4px 8px",
+                  lineHeight: 1,
+                }}
               >
                 &times;
               </button>
             </div>
-            <form onSubmit={handleSaveLevel}>
-              <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-                <div className="form-group">
-                  <label className="form-label">Parent Course <span style={{ color: "var(--status-error)" }}>*</span></label>
-                  <select
-                    className="form-input"
-                    value={levelCourseId}
-                    onChange={(e) => setLevelCourseId(e.target.value)}
-                    required
+            <form onSubmit={handleSaveLevel} style={{ display: "flex", flexDirection: "column", overflow: "hidden", flex: 1, margin: 0 }}>
+              <div
+                className="modal-body"
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "14px",
+                  overflowY: "auto",
+                  padding: "20px",
+                  flex: 1,
+                }}
+              >
+                {error && (
+                  <div
+                    className="alert alert-error"
+                    style={{
+                      marginBottom: "6px",
+                      padding: "10px 12px",
+                      borderRadius: "6px",
+                      fontSize: "13px",
+                      backgroundColor: "rgba(239, 68, 68, 0.1)",
+                      color: "var(--status-error, #b91c1c)",
+                      border: "1px solid rgba(239, 68, 68, 0.3)",
+                    }}
                   >
-                    <option value="">-- Select Course --</option>
-                    {courses.map((c) => (
-                      <option key={c.id} value={c.id}>{c.name} ({c.code})</option>
-                    ))}
-                  </select>
-                </div>
+                    {error}
+                  </div>
+                )}
                 <div className="form-group">
                   <label className="form-label">Level Name <span style={{ color: "var(--status-error)" }}>*</span></label>
                   <input
@@ -1545,6 +1965,7 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
                     value={levelName}
                     onChange={(e) => setLevelName(e.target.value)}
                     required
+                    autoFocus
                   />
                 </div>
                 <div className="form-group">
@@ -1561,14 +1982,25 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
                   <label className="form-label">Description (Optional)</label>
                   <textarea
                     className="form-input"
-                    rows="2"
+                    rows="3"
                     placeholder="Brief description of skills or prerequisites for this level"
                     value={levelDescription}
                     onChange={(e) => setLevelDescription(e.target.value)}
                   />
                 </div>
               </div>
-              <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "10px" }}>
+              <div
+                className="modal-footer"
+                style={{
+                  display: "flex",
+                  justifyContent: "flex-end",
+                  gap: "10px",
+                  padding: "14px 20px",
+                  borderTop: "1px solid var(--border-color)",
+                  backgroundColor: "var(--bg-surface)",
+                  flexShrink: 0,
+                }}
+              >
                 <button
                   type="button"
                   className="btn btn-secondary"
@@ -1871,6 +2303,7 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
           submodules={submodules}
           files={files}
           onMappingSaved={handleMappingSaved}
+          initialShowPreview={mappingModalConfig.initialShowPreview}
         />
       )}
 
@@ -1897,6 +2330,71 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
           submitting={submitting}
           onClose={handleCloseDeleteModuleModal}
           onConfirm={handleConfirmDeleteModule}
+        />
+      )}
+
+      {/* Level Permanent Deletion Confirmation Modal */}
+      {showDeleteLevelModal && (
+        <LevelDeleteModal
+          show={showDeleteLevelModal}
+          level={levelToDelete}
+          modulesCount={modules.filter((m) => m.level === levelToDelete?.id).length}
+          submitting={submitting}
+          onClose={() => {
+            if (!submitting) {
+              setShowDeleteLevelModal(false);
+              setLevelToDelete(null);
+            }
+          }}
+          onConfirm={handleConfirmDeleteLevel}
+        />
+      )}
+
+      {/* Generic Confirmation Modal for Important Curriculum / Module Operations */}
+      {confirmConfig.show && (
+        <ConfirmActionModal
+          show={confirmConfig.show}
+          title={confirmConfig.title}
+          message={confirmConfig.message}
+          affectedItem={confirmConfig.affectedItem}
+          confirmLabel={confirmConfig.confirmLabel}
+          cancelLabel={confirmConfig.cancelLabel}
+          isDanger={confirmConfig.isDanger}
+          submitting={submitting}
+          onClose={() => {
+            if (!submitting) {
+              setConfirmConfig((prev) => ({ ...prev, show: false }));
+            }
+          }}
+          onConfirm={confirmConfig.onConfirm}
+        />
+      )}
+
+      {/* Module Insert Modal */}
+      {showInsertModuleModal && (
+        <ModuleInsertModal
+          show={showInsertModuleModal}
+          course={insertModalConfig.course}
+          level={insertModalConfig.level}
+          levelModules={insertModalConfig.levelModules}
+          submitting={submitting}
+          onClose={() => setShowInsertModuleModal(false)}
+          onInsert={handleInsertModule}
+        />
+      )}
+
+      {/* Module Upload Modal */}
+      {showUploadModuleModal && (
+        <ModuleUploadModal
+          show={showUploadModuleModal}
+          module={uploadTargetModule}
+          submodules={submodules.filter((s) => s.module === uploadTargetModule?.id)}
+          submitting={submitting}
+          onClose={() => {
+            setShowUploadModuleModal(false);
+            setUploadTargetModule(null);
+          }}
+          onUpload={handleUploadModuleContent}
         />
       )}
 

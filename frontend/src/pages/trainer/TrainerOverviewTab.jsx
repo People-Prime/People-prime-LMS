@@ -7,15 +7,22 @@ export default function TrainerOverviewTab({ onNavigateToLearners, onSelectLearn
   const isAdminPreview = user?.role === "ADMIN" && activePortal === "TRAINER";
 
   const [learners, setLearners] = useState([]);
+  const [totalLmsModules, setTotalLmsModules] = useState(0);
   const [loading, setLoading] = useState(!isAdminPreview);
   const [error, setError] = useState(null);
 
   const loadOverview = useCallback(async () => {
     if (isAdminPreview) return;
     try {
-      const data = await apiClient("/trainer/learners/");
+      const [data, totalModulesRes] = await Promise.all([
+        apiClient("/trainer/learners/"),
+        apiClient("/modules/total-count/").catch(() => null),
+      ]);
       const learnerList = Array.isArray(data?.learners) ? data.learners : [];
       setLearners(learnerList);
+      if (totalModulesRes && typeof totalModulesRes.total_modules === "number") {
+        setTotalLmsModules(totalModulesRes.total_modules);
+      }
       setError(null);
     } catch (err) {
       setError(err.message || "Failed to load trainer overview.");
@@ -32,10 +39,16 @@ export default function TrainerOverviewTab({ onNavigateToLearners, onSelectLearn
     let isMounted = true;
     async function init() {
       try {
-        const data = await apiClient("/trainer/learners/");
+        const [data, totalModulesRes] = await Promise.all([
+          apiClient("/trainer/learners/"),
+          apiClient("/modules/total-count/").catch(() => null),
+        ]);
         if (isMounted) {
           const learnerList = Array.isArray(data?.learners) ? data.learners : [];
           setLearners(learnerList);
+          if (totalModulesRes && typeof totalModulesRes.total_modules === "number") {
+            setTotalLmsModules(totalModulesRes.total_modules);
+          }
           setError(null);
           setLoading(false);
         }

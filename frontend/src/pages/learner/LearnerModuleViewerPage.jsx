@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { useAuth } from "../../hooks/useAuth";
 import { apiClient } from "../../services/api";
+import SecurePdfViewer from "../../components/common/SecurePdfViewer";
 
 /**
  * LearnerModuleViewerPage Component
@@ -26,7 +27,6 @@ export default function LearnerModuleViewerPage() {
   const moduleIdParam = searchParams.get("moduleId");
 
   const [moduleData, setModuleData] = useState(null);
-  const [assessmentModuleId, setAssessmentModuleId] = useState(null);
   const [materials, setMaterials] = useState([]);
   const [selectedFileId, setSelectedFileId] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -46,11 +46,10 @@ export default function LearnerModuleViewerPage() {
         setLoading(true);
         setError(null);
 
-        // Fetch module details, mapped materials, and active questions concurrently
-        const [modRes, matsRes, questionsRes] = await Promise.all([
+        // Fetch module details and mapped materials concurrently
+        const [modRes, matsRes] = await Promise.all([
           apiClient(`/modules/${moduleIdParam}/`),
           apiClient(`/modules/${moduleIdParam}/materials/`).catch(() => []),
-          apiClient(`/module-questions/?module=${moduleIdParam}&is_active=true`).catch(() => []),
         ]);
 
         if (!isMounted) return;
@@ -61,25 +60,6 @@ export default function LearnerModuleViewerPage() {
 
         if (matsList.length > 0) {
           setSelectedFileId(matsList[0].file_id);
-        }
-
-        const currentModQuestions = Array.isArray(questionsRes) ? questionsRes : (questionsRes?.results || []);
-        if (currentModQuestions.length > 0) {
-          setAssessmentModuleId(Number(moduleIdParam));
-        } else {
-          // If current module has no questions, resolve the course's designated assessment module
-          const targetCourseId = courseIdParam || modRes?.course;
-          if (targetCourseId) {
-            apiClient(`/module-questions/?is_active=true`)
-              .then((allQRes) => {
-                const allQ = Array.isArray(allQRes) ? allQRes : (allQRes?.results || []);
-                const foundModuleId = allQ.find((q) => q.module)?.module;
-                if (foundModuleId && isMounted) {
-                  setAssessmentModuleId(Number(foundModuleId));
-                }
-              })
-              .catch(() => {});
-          }
         }
       } catch (err) {
         if (isMounted) {
@@ -114,10 +94,24 @@ export default function LearnerModuleViewerPage() {
   };
 
   const handleOpenAssessment = () => {
-    // Opens the interactive assessment reader tab focused on the assessment & feedback section
-    const targetModuleId = assessmentModuleId || moduleIdParam;
-    const targetCourseId = courseIdParam || moduleData?.course;
-    window.location.href = `/learner/reader?courseId=${targetCourseId}&moduleId=${targetModuleId}&target=assessment#assessment`;
+    // Opens the interactive module assessment directly in reader mode
+    const targetModuleId = moduleIdParam || moduleData?.id;
+    const rawCourseId =
+      courseIdParam && courseIdParam !== "null" && courseIdParam !== "undefined"
+        ? courseIdParam
+        : moduleData?.course;
+    const params = new URLSearchParams();
+    if (rawCourseId) {
+      params.set("courseId", String(rawCourseId));
+    }
+    if (targetModuleId) {
+      params.set("moduleId", String(targetModuleId));
+    }
+    if (moduleData?.level) {
+      params.set("levelId", String(moduleData.level));
+    }
+    params.set("target", "assessment");
+    window.location.href = `/learner/reader?${params.toString()}#assessment`;
   };
 
   if (loading) {
@@ -231,12 +225,6 @@ export default function LearnerModuleViewerPage() {
       >
         <div style={{ display: "flex", alignItems: "center", gap: "12px", minWidth: 0 }}>
           <span
-            className="badge badge-info"
-            style={{ fontFamily: "var(--font-mono)", fontSize: "11px", flexShrink: 0 }}
-          >
-            {moduleData.code || `MOD-${moduleData.id}`}
-          </span>
-          <span
             style={{
               fontWeight: "600",
               fontSize: "15px",
@@ -268,25 +256,27 @@ export default function LearnerModuleViewerPage() {
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: "10px", flexShrink: 0 }}>
-          {/* Assessment & Rating Shortcut */}
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={handleOpenAssessment}
-            style={{
-              padding: "5px 12px",
-              fontSize: "12px",
-              backgroundColor: "rgba(99, 102, 241, 0.15)",
-              color: "#a5b4fc",
-              borderColor: "rgba(99, 102, 241, 0.3)",
-              display: "inline-flex",
-              alignItems: "center",
-              gap: "6px",
-            }}
-            title="Open Module Assessment, Retakes & Feedback"
-          >
-            <span>📝 Assessment &amp; Feedback</span>
-          </button>
+          {/* Assessment & Rating Shortcut - Strictly visible only for Learners */}
+          {user?.role === "LEARNER" && !isAdmin && activePortal !== "TRAINER" && (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={handleOpenAssessment}
+              style={{
+                padding: "5px 12px",
+                fontSize: "12px",
+                backgroundColor: "rgba(99, 102, 241, 0.15)",
+                color: "#a5b4fc",
+                borderColor: "rgba(99, 102, 241, 0.3)",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+              }}
+              title="Open Module Assessment, Retakes & Feedback"
+            >
+              <span>📝 Assessment &amp; Feedback</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -358,7 +348,7 @@ export default function LearnerModuleViewerPage() {
       )}
 
       {/* Main File Preview Area */}
-      <div style={{ flex: 1, position: "relative", backgroundColor: "#0f172a" }}>
+      <div style={{ flex: 1, minHeight: 0, position: "relative", backgroundColor: "#f1f5f9", display: "flex", flexDirection: "column", overflow: "hidden" }}>
         {materials.length === 0 ? (
           <div
             style={{
@@ -379,28 +369,47 @@ export default function LearnerModuleViewerPage() {
             <p style={{ margin: "0 0 16px 0", fontSize: "13px", maxWidth: "420px" }}>
               No reference materials have been mapped to this module yet. You can still complete the module questions and verification gate.
             </p>
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={handleOpenAssessment}
-              style={{ padding: "8px 16px", fontSize: "13px" }}
-            >
-              Open Module Assessment &rarr;
-            </button>
+            {user?.role === "LEARNER" && !isAdmin && activePortal !== "TRAINER" && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={handleOpenAssessment}
+                style={{ padding: "8px 16px", fontSize: "13px" }}
+              >
+                Open Module Assessment &rarr;
+              </button>
+            )}
           </div>
-        ) : activeFile && fileUrl ? (
-          <iframe
-            src={fileUrl}
-            title={activeFile.filename}
-            className="lms-document-viewer-container"
-            onContextMenu={(e) => e.preventDefault()}
-            style={{
-              width: "100%",
-              height: "100%",
-              border: "none",
-              backgroundColor: "#ffffff",
-            }}
-          />
+        ) : activeFile && rawFileUrl ? (
+          ["PNG", "JPG", "JPEG", "WEBP", "GIF"].includes((activeFile.file_type || "").toUpperCase()) ? (
+            <div
+              style={{
+                width: "100%",
+                height: "100%",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: "20px",
+                overflow: "auto",
+                backgroundColor: "#1e293b",
+              }}
+            >
+              <img
+                src={rawFileUrl}
+                alt={activeFile.filename}
+                style={{
+                  maxWidth: "100%",
+                  maxHeight: "100%",
+                  objectFit: "contain",
+                  boxShadow: "0 10px 25px rgba(0,0,0,0.5)",
+                  borderRadius: "4px",
+                }}
+                onContextMenu={(e) => e.preventDefault()}
+              />
+            </div>
+          ) : (
+            <SecurePdfViewer url={rawFileUrl} title={activeFile.filename} />
+          )
         ) : (
           <div
             style={{

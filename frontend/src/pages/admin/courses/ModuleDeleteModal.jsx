@@ -58,7 +58,7 @@ export default function ModuleDeleteModal({
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
-            backgroundColor: isPublished ? "rgba(239, 68, 68, 0.12)" : "rgba(245, 158, 11, 0.12)",
+            backgroundColor: "rgba(239, 68, 68, 0.12)",
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
@@ -68,10 +68,10 @@ export default function ModuleDeleteModal({
                 margin: 0,
                 fontSize: "16px",
                 fontWeight: "700",
-                color: isPublished ? "var(--status-error, #dc2626)" : "var(--status-warning, #d97706)",
+                color: "var(--status-error, #dc2626)",
               }}
             >
-              Confirm Module Deletion
+              Confirm Permanent Module Deletion
             </h3>
           </div>
           <button
@@ -94,7 +94,7 @@ export default function ModuleDeleteModal({
         {/* Body */}
         <div className="modal-body" style={{ padding: "20px" }}>
           <p style={{ margin: "0 0 14px 0", fontSize: "14px", lineHeight: "1.5", color: "var(--text-main)" }}>
-            Are you sure you want to permanently delete module <strong>&quot;{module.name}&quot;</strong> (Code: <code>{module.code}</code>)?
+            Are you sure you want to permanently delete module <strong>&quot;{module.name}&quot;</strong>?
           </p>
 
           <div
@@ -116,28 +116,26 @@ export default function ModuleDeleteModal({
             </div>
           </div>
 
-          {/* Strong Warning for Published Modules */}
-          {isPublished && (
-            <div
-              className="alert alert-error"
-              style={{
-                marginBottom: "16px",
-                padding: "12px 14px",
-                fontSize: "12px",
-                lineHeight: "1.5",
-                borderRadius: "6px",
-                backgroundColor: "rgba(239, 68, 68, 0.1)",
-                color: "#b91c1c",
-                border: "1px solid rgba(239, 68, 68, 0.3)",
-              }}
-            >
-              <strong>Critical Warning — Published Module:</strong>
-              <div style={{ marginTop: "4px" }}>
-                This module is currently <strong>PUBLISHED</strong>. Deleting it will permanently remove all associated lessons,
-                curriculum materials, and any learner evaluation records linked to this module. This action is irreversible.
-              </div>
+          <div
+            className="alert alert-error"
+            style={{
+              marginBottom: "16px",
+              padding: "12px 14px",
+              fontSize: "12px",
+              lineHeight: "1.5",
+              borderRadius: "6px",
+              backgroundColor: "rgba(239, 68, 68, 0.1)",
+              color: "#b91c1c",
+              border: "1px solid rgba(239, 68, 68, 0.3)",
+            }}
+          >
+            <strong>Critical Permanent Deletion Warning:</strong>
+            <div style={{ marginTop: "4px" }}>
+              This action will permanently delete this module, its submodules, uploaded learning content,
+              assessment questions, learner responses, assessment attempts, progress records, and associated feedback.
+              This action cannot be undone.
             </div>
-          )}
+          </div>
 
           {/* Impact Breakdown */}
           <div style={{ marginBottom: "16px" }}>
@@ -241,7 +239,7 @@ export default function ModuleDeleteModal({
                 Deleting Module...
               </>
             ) : (
-              `Delete ${isPublished ? "Published " : ""}Module`
+              "Permanently Delete"
             )}
           </button>
         </div>

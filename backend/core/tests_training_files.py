@@ -98,9 +98,10 @@ class TrainingFileAPITests(APITestCase):
         self.assertEqual(b"".join(dl_resp.streaming_content), content)
 
     def test_training_clusters_and_mappings_crud(self):
-        from core.models import Course, Module, Submodule, TrainingCluster, TrainingFileMapping, DocumentCategory
+        from core.models import Course, CourseLevel, Module, Submodule, TrainingCluster, TrainingFileMapping, DocumentCategory
         course = Course.objects.create(name="Test Course", code="TEST-C1", order=99)
-        mod = Module.objects.create(course=course, name="Test Mod", code="TMOD-1", order=1)
+        level = CourseLevel.objects.create(course=course, name="Test Level", order=1)
+        mod = Module.objects.create(course=course, level=level, name="Test Mod", order=1)
         sub = Submodule.objects.create(module=mod, name="Test Sub", order=1)
 
         # Upload file first
@@ -149,9 +150,10 @@ class TrainingFileAPITests(APITestCase):
 
     def test_admin_safe_delete_training_file_with_mappings(self):
         import os
-        from core.models import Course, Module, Submodule, TrainingCluster, TrainingFileMapping, DocumentCategory, AuditLog, AuditAction
+        from core.models import Course, CourseLevel, Module, Submodule, TrainingCluster, TrainingFileMapping, DocumentCategory, AuditLog, AuditAction
         course = Course.objects.create(name="Delete Test Course", code="DEL-C1", order=98)
-        mod = Module.objects.create(course=course, name="Delete Mod", code="DMOD-1", order=1)
+        level = CourseLevel.objects.create(course=course, name="Delete Test Level", order=1)
+        mod = Module.objects.create(course=course, level=level, name="Delete Mod", order=1)
         sub = Submodule.objects.create(module=mod, name="Delete Sub", order=1)
 
         # Upload file

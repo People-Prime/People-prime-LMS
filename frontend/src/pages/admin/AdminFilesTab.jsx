@@ -741,8 +741,15 @@ export default function AdminFilesTab() {
                                             type="button"
                                             className="btn btn-secondary"
                                             style={{ padding: "3px 8px", fontSize: "11px" }}
-                                            onClick={() => window.open(m.download_url, "_blank")}
-                                            title="Preview material"
+                                            onClick={() =>
+                                              window.open(
+                                                `/viewer?fileId=${m.training_file_id || m.file_id || m.training_file}&title=${encodeURIComponent(
+                                                  m.filename || "Material"
+                                                )}`,
+                                                "_blank"
+                                              )
+                                            }
+                                            title="Preview material in secure viewer"
                                           >
                                             Preview
                                           </button>
@@ -850,9 +857,16 @@ export default function AdminFilesTab() {
                               <button
                                 type="button"
                                 className="btn btn-secondary"
-                                onClick={() => window.open(file.download_url, "_blank")}
+                                onClick={() =>
+                                  window.open(
+                                    `/viewer?fileId=${file.id}&title=${encodeURIComponent(
+                                      file.filename
+                                    )}`,
+                                    "_blank"
+                                  )
+                                }
                                 style={{ padding: "4px 8px", fontSize: "12px" }}
-                                title="Preview file"
+                                title="Preview file in secure viewer"
                               >
                                 Preview
                               </button>
@@ -1024,7 +1038,6 @@ export default function AdminFilesTab() {
                 >
                   <option value="">None (Cluster-level general material)</option>
                   {modules
-                    .filter((m) => m.course === 6 || m.course_name?.includes("IT Recruitment"))
                     .map((m) => (
                       <option key={m.id} value={m.id}>
                         Module {m.order}: {m.name}

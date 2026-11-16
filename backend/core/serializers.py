@@ -71,8 +71,13 @@ class CourseLevelSerializer(serializers.ModelSerializer):
     Serializer for CourseLevel entities (e.g., Level 1, Level 2, Level 3).
     Includes dynamically calculated modules_count.
     """
-    course_name = serializers.ReadOnlyField(source="course.name")
-    course_code = serializers.ReadOnlyField(source="course.code")
+    course = serializers.PrimaryKeyRelatedField(
+        queryset=Course.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    course_name = serializers.ReadOnlyField(source="course.name", default=None)
+    course_code = serializers.ReadOnlyField(source="course.code", default=None)
     modules_count = serializers.SerializerMethodField()
 
     class Meta:
@@ -97,18 +102,42 @@ class CourseLevelSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        validators = [
-            UniqueTogetherValidator(
-                queryset=CourseLevel.objects.all(),
-                fields=["course", "name"],
-                message="A level with this name already exists in the selected course.",
-            ),
-            UniqueTogetherValidator(
-                queryset=CourseLevel.objects.all(),
-                fields=["course", "order"],
-                message="A level with this order number already exists in the selected course.",
-            ),
-        ]
+        validators = []
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        course = attrs["course"] if "course" in attrs else (self.instance.course if self.instance else None)
+        raw_name = attrs.get("name", getattr(self.instance, "name", None))
+        name = raw_name.strip() if raw_name else None
+        if "name" in attrs and name is not None:
+            attrs["name"] = name
+        order = attrs.get("order", getattr(self.instance, "order", None))
+
+        if course is not None:
+            qs = CourseLevel.objects.filter(course=course)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if name and qs.filter(name__iexact=name).exists():
+                raise serializers.ValidationError({
+                    "name": "A level with this name already exists in the selected course."
+                })
+            if order is not None and qs.filter(order=order).exists():
+                raise serializers.ValidationError({
+                    "order": "A level with this order number already exists in the selected course."
+                })
+        else:
+            qs = CourseLevel.objects.filter(course__isnull=True)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if name and qs.filter(name__iexact=name).exists():
+                raise serializers.ValidationError({
+                    "name": "A level with this name already exists."
+                })
+            if order is not None and qs.filter(order=order).exists():
+                raise serializers.ValidationError({
+                    "order": "A level with this order number already exists."
+                })
+        return attrs
 
     def get_modules_count(self, obj):
         return obj.modules.count()
@@ -116,11 +145,26 @@ class CourseLevelSerializer(serializers.ModelSerializer):
 
 class ModuleSerializer(serializers.ModelSerializer):
     """
-    Serializer for Module entities belonging to a Course.
+    Serializer for Module entities belonging directly to a Level and optionally to a Course.
     """
-    course_name = serializers.ReadOnlyField(source="course.name")
-    level_name = serializers.ReadOnlyField(source="level.name")
-    created_by_username = serializers.ReadOnlyField(source="created_by.username")
+    course = serializers.PrimaryKeyRelatedField(
+        queryset=Course.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    level = serializers.PrimaryKeyRelatedField(
+        queryset=CourseLevel.objects.all(),
+        required=True,
+        allow_null=False,
+    )
+    course_name = serializers.ReadOnlyField(source="course.name", default=None)
+    level_name = serializers.ReadOnlyField(source="level.name", default=None)
+    created_by_username = serializers.ReadOnlyField(source="created_by.username", default=None)
+    estimated_duration_minutes = serializers.IntegerField(
+        required=False,
+        default=0,
+        allow_null=True,
+    )
 
     class Meta:
         model = Module
@@ -131,7 +175,6 @@ class ModuleSerializer(serializers.ModelSerializer):
             "level",
             "level_name",
             "name",
-            "code",
             "description",
             "order",
             "estimated_duration_minutes",
@@ -153,24 +196,32 @@ class ModuleSerializer(serializers.ModelSerializer):
         validators = [
             UniqueTogetherValidator(
                 queryset=Module.objects.all(),
-                fields=["course", "code"],
-                message="A module with this code already exists in the selected course.",
-            ),
-            UniqueTogetherValidator(
-                queryset=Module.objects.all(),
-                fields=["course", "order"],
-                message="A module with this order number already exists in the selected course.",
+                fields=["level", "order"],
+                message="A module with this order number already exists in the selected level.",
             ),
         ]
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
-        course = attrs.get("course") or (self.instance.course if self.instance else None)
-        level = attrs.get("level") if "level" in attrs else (self.instance.level if self.instance else None)
-        if course and level and level.course_id != course.id:
+        # Handle optional estimated_duration_minutes (None or omitted -> 0 or preserved)
+        if "estimated_duration_minutes" in attrs and attrs["estimated_duration_minutes"] is None:
+            attrs["estimated_duration_minutes"] = 0
+
+        course = attrs["course"] if "course" in attrs else (self.instance.course if self.instance else None)
+        level = attrs["level"] if "level" in attrs else (self.instance.level if self.instance else None)
+        if course and level and level.course_id and level.course_id != course.id:
             raise serializers.ValidationError({
                 "level": f"The assigned level '{level.name}' belongs to course '{level.course.code}', but this module belongs to course '{course.code}'."
             })
+        if course is not None:
+            order = attrs.get("order", getattr(self.instance, "order", None))
+            qs = Module.objects.filter(course=course)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if order is not None and qs.filter(order=order).exists():
+                raise serializers.ValidationError({
+                    "order": "A module with this order number already exists in the selected course."
+                })
         return attrs
 
 
@@ -404,10 +455,11 @@ class TrainerGroupAssignmentSerializer(serializers.ModelSerializer):
 
 class TrainingAssignmentSerializer(serializers.ModelSerializer):
     """
-    Serializer for assigning training (Course or Module) to recipients
+    Serializer for assigning training (Course, Level, or Module) to recipients
     (LearnerGroup, CandidateType, or Individual Learner).
     """
     course_name = serializers.ReadOnlyField(source="course.name")
+    level_name = serializers.ReadOnlyField(source="level.name")
     module_name = serializers.ReadOnlyField(source="module.name")
     learner_group_name = serializers.ReadOnlyField(source="learner_group.name")
     candidate_type_name = serializers.ReadOnlyField(source="candidate_type.name")
@@ -420,6 +472,8 @@ class TrainingAssignmentSerializer(serializers.ModelSerializer):
             "id",
             "course",
             "course_name",
+            "level",
+            "level_name",
             "module",
             "module_name",
             "learner_group",
@@ -437,6 +491,7 @@ class TrainingAssignmentSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id",
             "course_name",
+            "level_name",
             "module_name",
             "learner_group_name",
             "candidate_type_name",
@@ -447,6 +502,7 @@ class TrainingAssignmentSerializer(serializers.ModelSerializer):
         ]
         extra_kwargs = {
             "course": {"required": False, "allow_null": True},
+            "level": {"required": False, "allow_null": True},
             "module": {"required": False, "allow_null": True},
             "learner_group": {"required": False, "allow_null": True},
             "candidate_type": {"required": False, "allow_null": True},
@@ -456,27 +512,28 @@ class TrainingAssignmentSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         """
         Enforce model invariants:
-        1. Exactly one curriculum target: Course or Module.
+        1. Exactly one curriculum target: Course, Level, or Module.
         2. Exactly one recipient: LearnerGroup, CandidateType, or Individual Learner.
         3. If recipient is Learner, user must be active and have LEARNER role.
         4. Enforce composite uniqueness matching the model's conditional unique constraints.
         """
         course = attrs.get("course", getattr(self.instance, "course", None))
+        level = attrs.get("level", getattr(self.instance, "level", None))
         module = attrs.get("module", getattr(self.instance, "module", None))
         learner_group = attrs.get("learner_group", getattr(self.instance, "learner_group", None))
         candidate_type = attrs.get("candidate_type", getattr(self.instance, "candidate_type", None))
         learner = attrs.get("learner", getattr(self.instance, "learner", None))
 
         # Check curriculum target: exactly one required
-        targets = [bool(course), bool(module)]
+        targets = [bool(course), bool(level), bool(module)]
         target_count = sum(targets)
         if target_count == 0:
             raise serializers.ValidationError(
-                {"curriculum_target": "A training assignment must specify exactly one curriculum target: Course or Module."}
+                {"curriculum_target": "A training assignment must specify exactly one curriculum target: Course, Level, or Module."}
             )
         if target_count > 1:
             raise serializers.ValidationError(
-                {"curriculum_target": "A training assignment cannot target a Course and Module simultaneously. Specify exactly one target."}
+                {"curriculum_target": "A training assignment cannot target Course, Level, or Module simultaneously. Specify exactly one target."}
             )
 
         # Check recipient: exactly one required
@@ -506,6 +563,8 @@ class TrainingAssignmentSerializer(serializers.ModelSerializer):
         target_filter = {}
         if course:
             target_filter["course"] = course
+        elif level:
+            target_filter["level"] = level
         elif module:
             target_filter["module"] = module
 
@@ -773,6 +832,18 @@ class ModuleQuestionResponseSerializer(serializers.ModelSerializer):
 
         # Get or determine the active attempt for this learner and question's module
         module = question.module
+
+        # Validate that if client specified a module ID in the payload, it matches question.module
+        raw_module_id = self.initial_data.get("module") if hasattr(self, "initial_data") else None
+        if raw_module_id is not None:
+            try:
+                if int(raw_module_id) != module.id:
+                    raise serializers.ValidationError(
+                        {"question": "Question does not belong to the specified module."}
+                    )
+            except (ValueError, TypeError):
+                raise serializers.ValidationError({"module": "Invalid module ID."})
+
         attempt = attrs.get("attempt")
         if not attempt:
             # Look up or create latest open attempt
@@ -1085,8 +1156,10 @@ class ModuleProgressDetailSerializer(serializers.Serializer):
     """
     module_id = serializers.IntegerField(source="id")
     module_name = serializers.CharField(source="name")
-    course_id = serializers.IntegerField(source="course.id")
-    course_name = serializers.CharField(source="course.name")
+    course_id = serializers.IntegerField(source="course.id", allow_null=True, required=False, default=None)
+    course_name = serializers.CharField(source="course.name", allow_null=True, required=False, default=None)
+    level_id = serializers.IntegerField(source="level.id", allow_null=True, required=False, default=None)
+    level_name = serializers.CharField(source="level.name", allow_null=True, required=False, default=None)
     total_required_questions = serializers.IntegerField()
     answered_required_questions = serializers.IntegerField()
     is_completed = serializers.BooleanField()
@@ -1165,8 +1238,10 @@ class AdminInProgressLearnerItemSerializer(serializers.Serializer):
     learner_name = serializers.CharField()
     learner_username = serializers.CharField()
     learner_email = serializers.CharField(allow_blank=True)
-    course_id = serializers.IntegerField()
+    course_id = serializers.IntegerField(allow_null=True)
     course_name = serializers.CharField()
+    level_id = serializers.IntegerField(allow_null=True, required=False)
+    level_name = serializers.CharField(allow_null=True, required=False)
     module_id = serializers.IntegerField()
     module_name = serializers.CharField()
     total_required_questions = serializers.IntegerField()
@@ -1583,7 +1658,7 @@ class AdminCreateUserSerializer(serializers.Serializer):
 class ReportOverviewSerializer(serializers.Serializer):
     """
     Serializer for Section A: Overview Metrics.
-    Role-scoped aggregate counts and completion percentage.
+    Role-scoped aggregate counts, completion percentage, and individual learner progress breakdown.
     """
     total_learners = serializers.IntegerField()
     total_courses = serializers.IntegerField()
@@ -1592,6 +1667,7 @@ class ReportOverviewSerializer(serializers.Serializer):
     in_progress_courses = serializers.IntegerField()
     not_started_courses = serializers.IntegerField()
     overall_completion_percentage = serializers.FloatField()
+    learners_progress = serializers.ListField(child=serializers.DictField(), required=False, default=list)
 
 
 class ReportLearnerPerformanceItemSerializer(serializers.Serializer):
@@ -1602,8 +1678,10 @@ class ReportLearnerPerformanceItemSerializer(serializers.Serializer):
     learner_id = serializers.IntegerField()
     learner_name = serializers.CharField()
     email = serializers.CharField(allow_blank=True)
-    course_id = serializers.IntegerField()
-    course_name = serializers.CharField()
+    course_id = serializers.IntegerField(allow_null=True)
+    course_name = serializers.CharField(allow_null=True)
+    level_id = serializers.IntegerField(allow_null=True, required=False)
+    level_name = serializers.CharField(allow_null=True, required=False)
     module_id = serializers.IntegerField()
     module_name = serializers.CharField()
     assessment_name = serializers.CharField(allow_null=True)
@@ -1617,10 +1695,12 @@ class ReportLearnerPerformanceItemSerializer(serializers.Serializer):
 class ReportCourseProgressItemSerializer(serializers.Serializer):
     """
     Serializer for Section C: Course Progress metrics.
-    Course-wise completion summary across assigned learners.
+    Course-wise and independent-Level completion summary across assigned learners.
     """
-    course_id = serializers.IntegerField()
+    course_id = serializers.IntegerField(allow_null=True)
     course_name = serializers.CharField()
+    level_id = serializers.IntegerField(allow_null=True, required=False)
+    level_name = serializers.CharField(allow_null=True, required=False)
     assigned_learners_count = serializers.IntegerField()
     completed_learners_count = serializers.IntegerField()
     in_progress_learners_count = serializers.IntegerField()
@@ -1679,7 +1759,7 @@ class TrainingClusterSerializer(serializers.ModelSerializer):
     """
     Serializer for TrainingCluster entities.
     """
-    course_name = serializers.ReadOnlyField(source="course.name")
+    course_name = serializers.ReadOnlyField(source="course.name", default=None)
     mappings_count = serializers.IntegerField(source="file_mappings.count", read_only=True)
 
     class Meta:
@@ -1701,12 +1781,28 @@ class TrainingClusterSerializer(serializers.ModelSerializer):
 
 class TrainingFileMappingSerializer(serializers.ModelSerializer):
     """
-    Serializer for TrainingFileMapping entities connecting files to clusters, modules, and submodules.
+    Serializer for TrainingFileMapping entities connecting files to modules and submodules.
+    Cluster is fully optional (legacy).
     """
     file_id = serializers.PrimaryKeyRelatedField(
         queryset=TrainingFile.objects.all(),
         source="training_file",
         write_only=True,
+    )
+    cluster = serializers.PrimaryKeyRelatedField(
+        queryset=TrainingCluster.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    module = serializers.PrimaryKeyRelatedField(
+        queryset=Module.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    submodule = serializers.PrimaryKeyRelatedField(
+        queryset=Submodule.objects.all(),
+        required=False,
+        allow_null=True,
     )
     training_file_id = serializers.ReadOnlyField(source="training_file.id")
     filename = serializers.ReadOnlyField(source="training_file.filename")
@@ -1714,12 +1810,11 @@ class TrainingFileMappingSerializer(serializers.ModelSerializer):
     file_size = serializers.ReadOnlyField(source="training_file.file_size")
     relative_path = serializers.ReadOnlyField(source="training_file.relative_path")
     download_url = serializers.SerializerMethodField()
-    cluster_name = serializers.ReadOnlyField(source="cluster.name")
-    cluster_code = serializers.ReadOnlyField(source="cluster.code")
-    module_name = serializers.ReadOnlyField(source="module.name")
-    module_code = serializers.ReadOnlyField(source="module.code")
-    submodule_name = serializers.ReadOnlyField(source="submodule.name")
-    submodule_order = serializers.ReadOnlyField(source="submodule.order")
+    cluster_name = serializers.ReadOnlyField(source="cluster.name", default=None)
+    cluster_code = serializers.ReadOnlyField(source="cluster.code", default=None)
+    module_name = serializers.ReadOnlyField(source="module.name", default=None)
+    submodule_name = serializers.ReadOnlyField(source="submodule.name", default=None)
+    submodule_order = serializers.ReadOnlyField(source="submodule.order", default=None)
 
     class Meta:
         model = TrainingFileMapping
@@ -1737,7 +1832,6 @@ class TrainingFileMappingSerializer(serializers.ModelSerializer):
             "cluster_code",
             "module",
             "module_name",
-            "module_code",
             "submodule",
             "submodule_name",
             "submodule_order",
@@ -1757,12 +1851,12 @@ class TrainingFileMappingSerializer(serializers.ModelSerializer):
             "cluster_name",
             "cluster_code",
             "module_name",
-            "module_code",
             "submodule_name",
             "submodule_order",
             "created_at",
             "updated_at",
         ]
+        validators = []
 
     def get_download_url(self, obj):
         request = self.context.get("request")
@@ -1772,15 +1866,37 @@ class TrainingFileMappingSerializer(serializers.ModelSerializer):
         return url
 
     def validate(self, attrs):
-        # Validate that submodule belongs to module
+        training_file = attrs.get("training_file") or (self.instance.training_file if self.instance else None)
         sub = attrs.get("submodule") or (self.instance.submodule if self.instance else None)
         mod = attrs.get("module") or (self.instance.module if self.instance else None)
         cluster = attrs.get("cluster") or (self.instance.cluster if self.instance else None)
 
+        # Validate that submodule belongs to module
         if sub and mod and sub.module_id != mod.id:
             raise serializers.ValidationError({"submodule": "Selected lesson does not belong to the selected module."})
-        if mod and cluster and mod.course_id != cluster.course_id:
+        if (
+            mod
+            and cluster
+            and mod.course_id is not None
+            and cluster.course_id is not None
+            and mod.course_id != cluster.course_id
+        ):
             raise serializers.ValidationError({"module": "Selected module belongs to a different course than the cluster."})
+
+        # Check duplicate attachment
+        if training_file and mod:
+            qs = TrainingFileMapping.objects.filter(training_file=training_file, module=mod)
+            if self.instance:
+                qs = qs.exclude(pk=self.instance.pk)
+            if sub:
+                qs = qs.filter(submodule=sub)
+            else:
+                qs = qs.filter(submodule__isnull=True)
+            if qs.exists():
+                raise serializers.ValidationError({
+                    "non_field_errors": ["This training material is already attached to the selected module/lesson."]
+                })
+
         return attrs
 
 

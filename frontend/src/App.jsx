@@ -9,6 +9,7 @@ import TrainerPortal from "./pages/TrainerPortal";
 import LearnerPortal from "./pages/LearnerPortal";
 import LearnerReaderPage from "./pages/learner/LearnerReaderPage";
 import LearnerModuleViewerPage from "./pages/learner/LearnerModuleViewerPage";
+import FileViewerPage from "./pages/FileViewerPage";
 import UnauthorizedPage from "./pages/UnauthorizedPage";
 import NotFoundPage from "./pages/NotFoundPage";
 import "./App.css";
@@ -114,6 +115,16 @@ export default function App() {
             element={
               <RouteGuard allowedRoles={["LEARNER", "TRAINER", "ADMIN"]}>
                 <LearnerModuleViewerPage />
+              </RouteGuard>
+            }
+          />
+
+          {/* Secure Application-Controlled Training Document Viewer */}
+          <Route
+            path="/viewer"
+            element={
+              <RouteGuard allowedRoles={["LEARNER", "TRAINER", "ADMIN"]}>
+                <FileViewerPage />
               </RouteGuard>
             }
           />

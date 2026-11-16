@@ -78,6 +78,7 @@ export default function LearnerCourseReader({
   initialModuleId = null,
   initialSubmoduleId = null,
   isStandaloneTab = false,
+  isAssessmentOnlyMode = false,
 }) {
   const { user, activePortal } = useAuth();
   const isAdminPreview = user?.role === "ADMIN" && activePortal === "LEARNER";
@@ -95,10 +96,21 @@ export default function LearnerCourseReader({
   const [questionsLoading, setQuestionsLoading] = useState(false);
   const [questionsError, setQuestionsError] = useState(null);
   const [submittingQuestionId, setSubmittingQuestionId] = useState(null);
+  const [submittingAssessment, setSubmittingAssessment] = useState(false);
   const [pendingSelections, setPendingSelections] = useState({}); // { [questionId]: optionId }
   const [retakeLoading, setRetakeLoading] = useState(false);
   const [showAttemptHistory, setShowAttemptHistory] = useState(false);
   const [submitError, setSubmitError] = useState(null);
+  const [activeTab, setActiveTab] = useState(() => {
+    if (typeof window !== "undefined") {
+      const search = window.location.search;
+      const hash = window.location.hash;
+      if (search.includes("target=assessment") || hash === "#assessment" || hash === "#module-assessment-section") {
+        return "assessment";
+      }
+    }
+    return "materials";
+  });
   const [retakeEligibility, setRetakeEligibility] = useState(null);
   const [completingSubmoduleId, setCompletingSubmoduleId] = useState(null);
   const [activeViewingSubmodule, setActiveViewingSubmodule] = useState(null);
@@ -136,10 +148,25 @@ export default function LearnerCourseReader({
       const allModules = Array.isArray(modulesRes) ? modulesRes : (modulesRes?.results || []);
       const allSubmodules = Array.isArray(submodulesRes) ? submodulesRes : (submodulesRes?.results || []);
 
-      // Filter to records belonging to this course
-      const courseModules = allModules
-        .filter((m) => m.course === course.id)
+      const targetModuleObj = initialModuleId
+        ? allModules.find((m) => m.id === initialModuleId)
+        : null;
+      const effectiveLevelId = course?.level_id || targetModuleObj?.level || null;
+
+      // Filter to records belonging to this course, its level (for course-less / hybrid modules), or the explicitly requested module
+      let courseModules = allModules
+        .filter((m) => {
+          if (initialModuleId && m.id === initialModuleId) return true;
+          if (course?.id && m.course === course.id) return true;
+          if (effectiveLevelId && m.level === effectiveLevelId && (!course?.id || !m.course)) return true;
+          return false;
+        })
         .sort((a, b) => (a.order || 0) - (b.order || 0));
+
+      // In assessment-only mode, isolate view strictly to the selected module
+      if (isAssessmentOnlyMode && initialModuleId) {
+        courseModules = courseModules.filter((m) => m.id === initialModuleId);
+      }
 
       const courseModuleIds = new Set(courseModules.map((m) => m.id));
 
@@ -160,7 +187,7 @@ export default function LearnerCourseReader({
     } finally {
       setLoading(false);
     }
-  }, [course.id]);
+  }, [course, isAssessmentOnlyMode, initialModuleId]);
 
   useEffect(() => {
     let isMounted = true;
@@ -178,9 +205,24 @@ export default function LearnerCourseReader({
           const allModules = Array.isArray(modulesRes) ? modulesRes : (modulesRes?.results || []);
           const allSubmodules = Array.isArray(submodulesRes) ? submodulesRes : (submodulesRes?.results || []);
 
-          const courseModules = allModules
-            .filter((m) => m.course === course.id)
+          const targetModuleObj = initialModuleId
+            ? allModules.find((m) => m.id === initialModuleId)
+            : null;
+          const effectiveLevelId = course?.level_id || targetModuleObj?.level || null;
+
+          let courseModules = allModules
+            .filter((m) => {
+              if (initialModuleId && m.id === initialModuleId) return true;
+              if (course?.id && m.course === course.id) return true;
+              if (effectiveLevelId && m.level === effectiveLevelId && (!course?.id || !m.course)) return true;
+              return false;
+            })
             .sort((a, b) => (a.order || 0) - (b.order || 0));
+
+          // In assessment-only mode, isolate view strictly to the selected module
+          if (isAssessmentOnlyMode && initialModuleId) {
+            courseModules = courseModules.filter((m) => m.id === initialModuleId);
+          }
 
           const courseModuleIds = new Set(courseModules.map((m) => m.id));
 
@@ -219,7 +261,7 @@ export default function LearnerCourseReader({
     return () => {
       isMounted = false;
     };
-  }, [course.id]);
+  }, [course, initialModuleId, initialSubmoduleId, isAssessmentOnlyMode]);
 
   // Fetch existing feedback and eligible trainers for the active module
   const loadModuleFeedback = useCallback(async (moduleId) => {
@@ -517,6 +559,74 @@ export default function LearnerCourseReader({
       [questionId]: optionId,
     }));
     setSubmitError(null);
+  };
+
+  // Submit all pending answers together for the assessment
+  const handleSubmitAssessment = async () => {
+    if (isAdminPreview) return;
+    if (submittingAssessment) return;
+
+    // Filter to active questions that need answers
+    const unansweredQuestions = questions.filter((q) => {
+      const existing = responseMap[q.id];
+      if (existing) return false;
+      return !pendingSelections[q.id];
+    });
+
+    if (unansweredQuestions.length > 0) {
+      setSubmitError(
+        `Please answer all questions before submitting. You have ${unansweredQuestions.length} unanswered question${unansweredQuestions.length > 1 ? "s" : ""}.`
+      );
+      // Smoothly scroll to the first unanswered question
+      const firstUnanswered = unansweredQuestions[0];
+      const el = document.getElementById(`question-card-${firstUnanswered.id}`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+      return;
+    }
+
+    // Determine questions that have pending selections to submit
+    const questionsToSubmit = questions.filter((q) => !responseMap[q.id] && pendingSelections[q.id]);
+    if (questionsToSubmit.length === 0) {
+      setSubmitError("All questions for this assessment have already been submitted.");
+      return;
+    }
+
+    setSubmittingAssessment(true);
+    setSubmitError(null);
+
+    try {
+      // Submit answers sequentially to guarantee predictable attempt scoring and completion
+      for (const q of questionsToSubmit) {
+        const selectedOptionId = pendingSelections[q.id];
+        await apiClient("/question-responses/", {
+          method: "POST",
+          body: {
+            question: q.id,
+            selected_option_id: selectedOptionId,
+          },
+        });
+      }
+
+      // Clear pending selections upon successful submission of all questions
+      setPendingSelections({});
+
+      // Refresh responses and module completion status
+      await loadModuleQuestions(selectedModuleId);
+
+      // Scroll smoothly to score/result banner
+      setTimeout(() => {
+        const el = document.getElementById("module-assessment-section");
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }, 100);
+    } catch (err) {
+      setSubmitError(err.message || "Failed to submit assessment answers. Please try again.");
+    } finally {
+      setSubmittingAssessment(false);
+    }
   };
 
   // Submit response to POST /api/question-responses/
@@ -987,7 +1097,14 @@ export default function LearnerCourseReader({
                             <button
                               type="button"
                               className="btn btn-primary"
-                              onClick={() => window.open(inlineUrl, "_blank")}
+                              onClick={() =>
+                                window.open(
+                                  `/viewer?url=${encodeURIComponent(
+                                    mat.download_url
+                                  )}&title=${encodeURIComponent(mat.filename)}`,
+                                  "_blank"
+                                )
+                              }
                               style={{
                                 padding: "5px 12px",
                                 fontSize: "12px",
@@ -1107,32 +1224,36 @@ export default function LearnerCourseReader({
           <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
           </svg>
-          Back to All Courses
+          {isAssessmentOnlyMode ? "Exit Assessment" : "Back to All Courses"}
         </button>
 
-        <button
-          type="button"
-          className="btn btn-secondary"
-          onClick={loadCourseContent}
-          disabled={loading}
-          style={{ padding: "6px 12px", fontSize: "12px" }}
-        >
-          Refresh Content
-        </button>
+        {!isAssessmentOnlyMode && (
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={loadCourseContent}
+            disabled={loading}
+            style={{ padding: "6px 12px", fontSize: "12px" }}
+          >
+            Refresh Content
+          </button>
+        )}
       </div>
 
       {/* Course Banner Card */}
       <div className="card" style={{ marginBottom: "24px", padding: "24px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px", flexWrap: "wrap" }}>
           <span className="badge badge-info" style={{ fontFamily: "var(--font-mono)" }}>
-            {course.code || `CRS-${course.id}`}
+            {course.code || (course.id ? `CRS-${course.id}` : "CURRICULUM")}
           </span>
-          <span className="badge badge-success">
-            {course.status}
-          </span>
+          {course.status && (
+            <span className="badge badge-success">
+              {course.status}
+            </span>
+          )}
         </div>
         <h2 style={{ fontSize: "22px", fontWeight: "700", color: "var(--text-main)", margin: "0 0 8px 0" }}>
-          {course.title}
+          {course.title || course.name}
         </h2>
         {course.description && (
           <p style={{ color: "var(--text-secondary)", fontSize: "14px", lineHeight: "1.6", margin: 0 }}>
@@ -1168,57 +1289,59 @@ export default function LearnerCourseReader({
           </p>
         </div>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", gap: "24px", alignItems: "start" }}>
-          {/* Modules Sidebar */}
-          <div className="card" style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "8px" }}>
-            <h4 style={{ fontSize: "12px", fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text-secondary)", margin: "4px 8px 8px 8px" }}>
-              Course Modules ({modules.length})
-            </h4>
-            {modules.map((mod) => {
-              const modSubCount = submodules.filter((s) => s.module === mod.id).length;
-              const isSelected = selectedModuleId === mod.id;
+        <div style={{ display: isAssessmentOnlyMode ? "block" : "grid", gridTemplateColumns: isAssessmentOnlyMode ? "1fr" : "280px 1fr", gap: "24px", alignItems: "start" }}>
+          {/* Modules Sidebar - hidden completely in assessment mode */}
+          {!isAssessmentOnlyMode && (
+            <div className="card" style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "8px" }}>
+              <h4 style={{ fontSize: "12px", fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text-secondary)", margin: "4px 8px 8px 8px" }}>
+                Course Modules ({modules.length})
+              </h4>
+              {modules.map((mod) => {
+                const modSubCount = submodules.filter((s) => s.module === mod.id).length;
+                const isSelected = selectedModuleId === mod.id;
 
-              return (
-                <button
-                  key={mod.id}
-                  type="button"
-                  onClick={() => setSelectedModuleId(mod.id)}
-                  style={{
-                    textAlign: "left",
-                    padding: "12px 14px",
-                    borderRadius: "8px",
-                    border: isSelected
-                      ? "1px solid var(--accent-primary)"
-                      : "1px solid var(--border-color)",
-                    backgroundColor: isSelected
-                      ? "var(--bg-active, rgba(59, 130, 246, 0.08))"
-                      : "var(--bg-card)",
-                    cursor: "pointer",
-                    transition: "all 0.15s ease",
-                  }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span style={{ fontSize: "11px", fontFamily: "var(--font-mono)", color: "var(--accent-secondary)" }}>
-                      Module #{mod.order || mod.id}
-                    </span>
-                    {mod.estimated_duration_minutes > 0 && (
-                      <span style={{ fontSize: "10px", color: "var(--text-muted)" }}>
-                        {mod.estimated_duration_minutes}m
+                return (
+                  <button
+                    key={mod.id}
+                    type="button"
+                    onClick={() => setSelectedModuleId(mod.id)}
+                    style={{
+                      textAlign: "left",
+                      padding: "12px 14px",
+                      borderRadius: "8px",
+                      border: isSelected
+                        ? "1px solid var(--accent-primary)"
+                        : "1px solid var(--border-color)",
+                      backgroundColor: isSelected
+                        ? "var(--bg-active, rgba(59, 130, 246, 0.08))"
+                        : "var(--bg-card)",
+                      cursor: "pointer",
+                      transition: "all 0.15s ease",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontSize: "11px", fontFamily: "var(--font-mono)", color: "var(--accent-secondary)" }}>
+                        Module #{mod.order || mod.id}
                       </span>
-                    )}
-                  </div>
-                  <div style={{ fontSize: "13px", fontWeight: "600", color: "var(--text-main)", margin: "4px 0" }}>
-                    {mod.name}
-                  </div>
-                  {mod.level_name && (
-                    <div style={{ fontSize: "11px", color: "var(--accent-secondary)", fontWeight: "500" }}>
-                      {mod.level_name}
+                      {mod.estimated_duration_minutes > 0 && (
+                        <span style={{ fontSize: "10px", color: "var(--text-muted)" }}>
+                          {mod.estimated_duration_minutes}m
+                        </span>
+                      )}
                     </div>
-                  )}
-                </button>
-              );
-            })}
-          </div>
+                    <div style={{ fontSize: "13px", fontWeight: "600", color: "var(--text-main)", margin: "4px 0" }}>
+                      {mod.name}
+                    </div>
+                    {mod.level_name && (
+                      <div style={{ fontSize: "11px", color: "var(--accent-secondary)", fontWeight: "500" }}>
+                        {mod.level_name}
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
           {/* Module Detail & Questions Panel */}
           <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
@@ -1229,7 +1352,7 @@ export default function LearnerCourseReader({
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "8px" }}>
                     <div>
                       <span style={{ fontSize: "12px", fontFamily: "var(--font-mono)", color: "var(--accent-secondary)" }}>
-                        Module #{activeModule.order || activeModule.id} &bull; Code: {activeModule.code}
+                        Module #{activeModule.order || activeModule.id}
                       </span>
                       <h3 style={{ fontSize: "18px", fontWeight: "700", color: "var(--text-main)", margin: "4px 0 6px 0" }}>
                         {activeModule.name}
@@ -1247,8 +1370,57 @@ export default function LearnerCourseReader({
                     </p>
                   )}
                 </div>
-                {/* Direct Module Instructional Content & Lessons (No submodule listing) */}
-                {activeSubmodules.length > 0 && (
+                {/* In Assessment Mode, only show the Assessment interface directly without tab switcher */}
+                {!isAssessmentOnlyMode && (
+                  <div style={{ display: "flex", gap: "10px", borderBottom: "1px solid var(--border-color)", paddingBottom: "8px" }}>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab("materials")}
+                      style={{
+                        padding: "8px 16px",
+                        fontSize: "13px",
+                        fontWeight: "600",
+                        borderRadius: "6px",
+                        border: "none",
+                        cursor: "pointer",
+                        backgroundColor: activeTab === "materials" ? "var(--color-primary, #2563eb)" : "transparent",
+                        color: activeTab === "materials" ? "#ffffff" : "var(--text-secondary)",
+                        transition: "all 0.15s ease",
+                      }}
+                    >
+                      📖 Learning Content &amp; Lessons ({activeSubmodules.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab("assessment")}
+                      style={{
+                        padding: "8px 16px",
+                        fontSize: "13px",
+                        fontWeight: "600",
+                        borderRadius: "6px",
+                        border: "none",
+                        cursor: "pointer",
+                        backgroundColor: activeTab === "assessment" ? "var(--color-primary, #2563eb)" : "transparent",
+                        color: activeTab === "assessment" ? "#ffffff" : "var(--text-secondary)",
+                        transition: "all 0.15s ease",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                      }}
+                    >
+                      <span>📝 Module Assessment ({questions.length} Questions)</span>
+                      {completionStatus?.is_tested_module && completionStatus?.has_passed && (
+                        <span className="badge badge-success" style={{ fontSize: "10px", padding: "1px 6px" }}>PASS</span>
+                      )}
+                      {completionStatus?.is_tested_module && completionStatus?.result === "FAIL" && (
+                        <span className="badge badge-error" style={{ fontSize: "10px", padding: "1px 6px" }}>FAIL</span>
+                      )}
+                    </button>
+                  </div>
+                )}
+
+                {/* Direct Module Instructional Content & Lessons (shown when activeTab === "materials" and NOT in assessment mode) */}
+                {!isAssessmentOnlyMode && activeTab === "materials" && activeSubmodules.length > 0 && (
                   <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
                     {retakeEligibility?.current_attempt_completed && (
                       <div
@@ -1407,7 +1579,14 @@ export default function LearnerCourseReader({
                                       <button
                                         type="button"
                                         className="btn btn-secondary"
-                                        onClick={() => window.open(inlineUrl, "_blank")}
+                                        onClick={() =>
+                                          window.open(
+                                            `/viewer?url=${encodeURIComponent(
+                                              mat.download_url
+                                            )}&title=${encodeURIComponent(mat.filename)}`,
+                                            "_blank"
+                                          )
+                                        }
                                         style={{ fontSize: "11px", padding: "3px 10px", whiteSpace: "nowrap" }}
                                       >
                                         👁 Open Document
@@ -1446,7 +1625,21 @@ export default function LearnerCourseReader({
                         </span>
                       ) : completionStatus ? (
                         <div>
-                          {completionStatus.is_module_completed ? (
+                          {completionStatus.is_tested_module ? (
+                            completionStatus.has_passed ? (
+                              <span className="badge badge-success" style={{ fontSize: "12px", padding: "4px 10px", display: "inline-flex", alignItems: "center", gap: "6px" }}>
+                                <span style={{ fontWeight: "700" }}>PASS</span> • &#10003; Module Completed ({completionStatus.marks_obtained} / {completionStatus.total_marks || 5} Marks)
+                              </span>
+                            ) : completionStatus.result === "FAIL" ? (
+                              <span className="badge badge-error" style={{ fontSize: "12px", padding: "4px 10px", display: "inline-flex", alignItems: "center", gap: "6px" }}>
+                                <span style={{ fontWeight: "700" }}>FAIL</span> • Not Completed / In Progress ({completionStatus.marks_obtained} / {completionStatus.total_marks || 5} Marks - Passing is 3/5)
+                              </span>
+                            ) : (
+                              <span className="badge badge-warning" style={{ fontSize: "12px", padding: "4px 10px" }}>
+                                Assessment In Progress ({completionStatus.answered_required_questions} of {completionStatus.total_required_questions} Answered)
+                              </span>
+                            )
+                          ) : completionStatus.is_module_completed ? (
                             <span className="badge badge-success" style={{ fontSize: "12px", padding: "4px 10px" }}>
                               &#10003; Module Completed ({completionStatus.answered_required_questions} of {completionStatus.total_required_questions} Answered)
                             </span>
@@ -1462,26 +1655,28 @@ export default function LearnerCourseReader({
                         </div>
                       ) : null}
 
-                      {/* Retake Button (Controlled by Stage 2 Retake Eligibility - disabled during Admin Preview) */}
+                      {/* Retake Button (Controlled by Retake Eligibility & Pass lock - disabled during Admin Preview) */}
                       {!isAdminPreview && completionStatus?.latest_attempt && questions.length > 0 && (
                         <button
                           type="button"
                           className="btn btn-secondary"
                           onClick={handleStartRetake}
-                          disabled={retakeLoading || !retakeEligibility?.can_retake}
+                          disabled={retakeLoading || (completionStatus?.is_tested_module ? !completionStatus?.can_retake : !retakeEligibility?.can_retake)}
                           style={{
                             fontSize: "12px",
                             padding: "5px 12px",
                             display: "flex",
                             alignItems: "center",
                             gap: "6px",
-                            opacity: retakeEligibility?.can_retake ? 1 : 0.6,
-                            cursor: retakeEligibility?.can_retake ? "pointer" : "not-allowed",
+                            opacity: (completionStatus?.is_tested_module ? completionStatus?.can_retake : retakeEligibility?.can_retake) ? 1 : 0.6,
+                            cursor: (completionStatus?.is_tested_module ? completionStatus?.can_retake : retakeEligibility?.can_retake) ? "pointer" : "not-allowed",
                           }}
                           title={
-                            retakeEligibility?.can_retake
-                              ? "Voluntary assessment retake. Retakes do not affect your course completion."
-                              : (retakeEligibility?.blocking_reasons || []).join(" ") || "Retake not available until required review is complete."
+                            completionStatus?.is_tested_module && completionStatus?.has_passed
+                              ? "You have already passed this assessment. Retakes are locked."
+                              : (completionStatus?.is_tested_module ? completionStatus?.can_retake : retakeEligibility?.can_retake)
+                              ? "Start a new assessment attempt to improve your score."
+                              : (retakeEligibility?.blocking_reasons || []).join(" ") || "Retake not available."
                           }
                         >
                           {retakeLoading ? (
@@ -1510,15 +1705,20 @@ export default function LearnerCourseReader({
                     >
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
-                          <div style={{ fontSize: "20px", fontWeight: "700", color: "var(--color-primary, #2563eb)" }}>
+                          <div style={{ fontSize: "20px", fontWeight: "700", color: completionStatus.is_tested_module ? (completionStatus.has_passed ? "var(--status-success)" : "var(--status-error)") : "var(--color-primary, #2563eb)" }}>
                             {completionStatus.latest_attempt.score} / {completionStatus.latest_attempt.total_possible}
                           </div>
                           <div>
-                            <div style={{ fontSize: "12px", fontWeight: "600", color: "var(--text-main)" }}>
-                              Attempt #{completionStatus.latest_attempt.attempt_number} Score ({completionStatus.latest_attempt.percentage}%)
+                            <div style={{ fontSize: "12px", fontWeight: "600", color: "var(--text-main)", display: "flex", alignItems: "center", gap: "8px" }}>
+                              <span>Attempt #{completionStatus.latest_attempt.attempt_number} Score ({completionStatus.latest_attempt.percentage}%)</span>
+                              {completionStatus.is_tested_module && completionStatus.latest_attempt.is_completed && (
+                                <span className={`badge ${completionStatus.latest_attempt.score >= 3.0 ? "badge-success" : "badge-error"}`} style={{ fontSize: "10px", padding: "1px 6px" }}>
+                                  {completionStatus.latest_attempt.score >= 3.0 ? "PASS" : "FAIL"}
+                                </span>
+                              )}
                             </div>
                             <div style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
-                              Status: {completionStatus.latest_attempt.is_completed ? "Completed" : "In Progress"} • Started: {new Date(completionStatus.latest_attempt.started_at).toLocaleDateString()}
+                              Status: {completionStatus.latest_attempt.is_completed ? "Completed" : "In Progress"} • Passing requirement: 3.0 / 5.0 (60%)
                             </div>
                           </div>
                         </div>
@@ -1648,6 +1848,7 @@ export default function LearnerCourseReader({
                         return (
                           <div
                             key={q.id}
+                            id={`question-card-${q.id}`}
                             className="card"
                             style={{
                               padding: "20px",
@@ -1658,7 +1859,7 @@ export default function LearnerCourseReader({
                             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px", flexWrap: "wrap", gap: "8px" }}>
                               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                                 <span style={{ fontSize: "12px", fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
-                                  Question #{q.order || q.id}
+                                  Question {q.order || (questions.indexOf(q) + 1)} of {questions.length}
                                 </span>
                                 <span className="badge badge-warning" style={{ fontSize: "10px" }}>
                                   Mandatory Assessment
@@ -1668,10 +1869,10 @@ export default function LearnerCourseReader({
                               {/* Answer Status Badge if answered */}
                               {isAnswered && (
                                 <span
-                                  className={`badge ${existingResponse.response_value ? "badge-success" : "badge-info"}`}
+                                  className="badge badge-success"
                                   style={{ fontSize: "12px", fontWeight: "600" }}
                                 >
-                                  Answered: {existingResponse.response_value ? "Yes" : "No"}
+                                  Answered: Yes
                                 </span>
                               )}
                             </div>
@@ -1717,7 +1918,7 @@ export default function LearnerCourseReader({
                                 </div>
                               </div>
                             ) : (
-                              /* Interactive Single-Answer Options Submission Form */
+                              /* Interactive Single-Answer Options Form */
                               <div
                                 style={{
                                   backgroundColor: "var(--bg-surface)",
@@ -1749,7 +1950,7 @@ export default function LearnerCourseReader({
                                             borderRadius: "var(--radius-sm)",
                                             border: isSelected ? "2px solid var(--color-primary, #2563eb)" : "1px solid var(--border-color)",
                                             backgroundColor: isSelected ? "rgba(37, 99, 235, 0.08)" : "transparent",
-                                            cursor: isSubmitting ? "not-allowed" : "pointer",
+                                            cursor: submittingAssessment ? "not-allowed" : "pointer",
                                             transition: "all 0.15s ease",
                                           }}
                                         >
@@ -1759,7 +1960,7 @@ export default function LearnerCourseReader({
                                             value={opt.id}
                                             checked={isSelected}
                                             onChange={() => handleSelectAnswer(q.id, opt.id)}
-                                            disabled={isSubmitting}
+                                            disabled={submittingAssessment}
                                             style={{ cursor: "pointer", width: "16px", height: "16px" }}
                                           />
                                           <span style={{ fontSize: "12px", fontWeight: "700", color: "var(--text-secondary)", minWidth: "18px" }}>
@@ -1774,61 +1975,29 @@ export default function LearnerCourseReader({
                                   ) : (
                                     /* Fallback to Yes / No buttons if options array is empty */
                                     <div style={{ display: "flex", gap: "12px" }}>
-                                      <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
+                                      <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: submittingAssessment ? "not-allowed" : "pointer" }}>
                                         <input
                                           type="radio"
                                           name={`q-option-${q.id}`}
                                           value="yes"
                                           checked={currentSelection === "yes"}
                                           onChange={() => handleSelectAnswer(q.id, "yes")}
-                                          disabled={isSubmitting}
+                                          disabled={submittingAssessment}
                                         />
                                         <span>Yes</span>
                                       </label>
-                                      <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
+                                      <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: submittingAssessment ? "not-allowed" : "pointer" }}>
                                         <input
                                           type="radio"
                                           name={`q-option-${q.id}`}
                                           value="no"
                                           checked={currentSelection === "no"}
                                           onChange={() => handleSelectAnswer(q.id, "no")}
-                                          disabled={isSubmitting}
+                                          disabled={submittingAssessment}
                                         />
                                         <span>No</span>
                                       </label>
                                     </div>
-                                  )}
-                                </div>
-
-                                {/* Submit Action Button */}
-                                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "6px" }}>
-                                  {isAdminPreview ? (
-                                    <span className="badge badge-info" style={{ fontSize: "12px", padding: "6px 14px" }}>
-                                      Preview Mode • Answer Submission Disabled
-                                    </span>
-                                  ) : (
-                                    <button
-                                      type="button"
-                                      className="btn btn-primary"
-                                      onClick={() => handleSubmitResponse(q.id)}
-                                      disabled={isSubmitting || !currentSelection}
-                                      style={{
-                                        padding: "8px 20px",
-                                        fontSize: "13px",
-                                        display: "flex",
-                                        alignItems: "center",
-                                        gap: "8px",
-                                      }}
-                                    >
-                                      {isSubmitting ? (
-                                        <>
-                                          <div className="spinner" style={{ width: "12px", height: "12px", borderWidth: "2px" }}></div>
-                                          Submitting...
-                                        </>
-                                      ) : (
-                                        "Submit Answer"
-                                      )}
-                                    </button>
                                   )}
                                 </div>
                               </div>
@@ -1836,6 +2005,64 @@ export default function LearnerCourseReader({
                           </div>
                         );
                       })}
+
+                      {/* Single Final Submit Assessment Button at the end of all questions */}
+                      {questions.some((q) => !responseMap[q.id]) && (
+                        <div
+                          className="card"
+                          style={{
+                            padding: "20px 24px",
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            flexWrap: "wrap",
+                            gap: "14px",
+                            backgroundColor: "var(--bg-secondary)",
+                            border: "1px solid var(--border-color)",
+                          }}
+                        >
+                          <div>
+                            <div style={{ fontSize: "14px", fontWeight: "600", color: "var(--text-main)" }}>
+                              Ready to submit your assessment?
+                            </div>
+                            <div style={{ fontSize: "12px", color: "var(--text-secondary)", marginTop: "2px" }}>
+                              {Object.keys(pendingSelections).length} of {questions.filter((q) => !responseMap[q.id]).length} remaining question(s) answered
+                            </div>
+                          </div>
+
+                          {isAdminPreview ? (
+                            <span className="badge badge-info" style={{ fontSize: "12px", padding: "8px 16px" }}>
+                              Preview Mode • Assessment Submission Disabled
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn btn-primary"
+                              onClick={handleSubmitAssessment}
+                              disabled={submittingAssessment}
+                              style={{
+                                padding: "10px 28px",
+                                fontSize: "14px",
+                                fontWeight: "600",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "10px",
+                                minWidth: "180px",
+                                justifyContent: "center",
+                              }}
+                            >
+                              {submittingAssessment ? (
+                                <>
+                                  <div className="spinner" style={{ width: "14px", height: "14px", borderWidth: "2px" }}></div>
+                                  Submitting Assessment...
+                                </>
+                              ) : (
+                                "Submit Assessment"
+                              )}
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

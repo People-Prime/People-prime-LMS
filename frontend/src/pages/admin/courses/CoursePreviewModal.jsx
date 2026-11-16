@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { getTrainingFileDownloadUrl } from "../../../services/api";
+import SecurePdfViewer from "../../../components/common/SecurePdfViewer";
 
 const CATEGORY_COLORS = {
   PRIMARY_INSTRUCTIONAL: "badge-primary",
@@ -73,14 +74,11 @@ export default function CoursePreviewModal({
     const fileName = mapping.filename || mapping.training_file_detail?.filename || `File #${fileId}`;
 
     if (["PDF", "DOCX", "DOC", "PNG", "JPG", "JPEG", "WEBP", "GIF"].includes(fileType)) {
-      const previewUrl = ["PDF", "DOCX", "DOC"].includes(fileType)
-        ? `${downloadUrl}#toolbar=0&navpanes=0&scrollbar=1`
-        : downloadUrl;
       setPreviewingMaterial({
         id: fileId,
         fileName,
         fileType,
-        url: previewUrl,
+        url: downloadUrl,
       });
     } else {
       setPreviewingMaterial({
@@ -237,7 +235,7 @@ export default function CoursePreviewModal({
                       >
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                           <span style={{ fontSize: "11px", fontWeight: "600", color: isModActive ? "#4f46e5" : "#6b7280" }}>
-                            Module {m.order}: {m.code}
+                            Module {m.order}
                           </span>
                           <span
                             style={{
@@ -545,7 +543,14 @@ export default function CoursePreviewModal({
                     <button
                       type="button"
                       className="btn btn-secondary"
-                      onClick={() => window.open(previewingMaterial.url, "_blank")}
+                      onClick={() =>
+                        window.open(
+                          `/viewer?fileId=${previewingMaterial.id}&title=${encodeURIComponent(
+                            previewingMaterial.fileName
+                          )}`,
+                          "_blank"
+                        )
+                      }
                       style={{ padding: "4px 10px", fontSize: "12px" }}
                     >
                       Open in New Tab
@@ -562,14 +567,14 @@ export default function CoursePreviewModal({
                 </div>
               </div>
 
-              <div style={{ flex: 1, backgroundColor: "#f3f4f6", overflow: "hidden", display: "flex", justifyContent: "center", alignItems: "center", padding: "20px" }}>
+              <div style={{ flex: 1, minHeight: 0, backgroundColor: "#f1f5f9", overflow: "hidden", display: "flex", flexDirection: "column", position: "relative", padding: "0" }}>
                 {previewingMaterial.unsupported ? (
-                  <div style={{ textAlign: "center", maxWidth: "420px" }}>
+                  <div style={{ textAlign: "center", maxWidth: "420px", padding: "20px" }}>
                     <div style={{ fontSize: "36px", marginBottom: "12px" }}>📄</div>
-                    <h4 style={{ fontSize: "16px", fontWeight: "600", color: "#111827", marginBottom: "8px" }}>
+                    <h4 style={{ fontSize: "16px", fontWeight: "600", color: "#f8fafc", marginBottom: "8px" }}>
                       Preview Unavailable for this Format
                     </h4>
-                    <p style={{ fontSize: "13px", color: "#6b7280", lineHeight: "1.5", margin: 0 }}>
+                    <p style={{ fontSize: "13px", color: "#94a3b8", lineHeight: "1.5", margin: 0 }}>
                       Direct inline preview is not supported for <strong>{previewingMaterial.fileType}</strong> documents, and downloads are restricted across the LMS.
                     </p>
                   </div>
@@ -578,15 +583,10 @@ export default function CoursePreviewModal({
                     src={previewingMaterial.url}
                     alt={previewingMaterial.fileName}
                     style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
+                    onContextMenu={(e) => e.preventDefault()}
                   />
                 ) : (
-                  <iframe
-                    src={previewingMaterial.url}
-                    title={previewingMaterial.fileName}
-                    className="lms-document-viewer-container"
-                    onContextMenu={(e) => e.preventDefault()}
-                    style={{ width: "100%", height: "100%", border: "none" }}
-                  />
+                  <SecurePdfViewer url={previewingMaterial.url} title={previewingMaterial.fileName} />
                 )}
               </div>
             </div>

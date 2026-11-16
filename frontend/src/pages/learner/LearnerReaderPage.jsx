@@ -21,6 +21,8 @@ export default function LearnerReaderPage() {
   const courseIdParam = searchParams.get("courseId");
   const moduleIdParam = searchParams.get("moduleId");
   const submoduleIdParam = searchParams.get("submoduleId");
+  const targetParam = searchParams.get("target");
+  const isAssessmentMode = targetParam === "assessment";
 
   const [course, setCourse] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -30,8 +32,13 @@ export default function LearnerReaderPage() {
     let isMounted = true;
 
     async function fetchTargetCourse() {
-      if (!courseIdParam) {
-        setError("No course was specified. Please return to your learning dashboard and select a course.");
+      const hasValidCourseId =
+        courseIdParam && courseIdParam !== "null" && courseIdParam !== "undefined";
+      const hasValidModuleId =
+        moduleIdParam && moduleIdParam !== "null" && moduleIdParam !== "undefined";
+
+      if (!hasValidCourseId && !hasValidModuleId) {
+        setError("No course or module was specified. Please return to your learning dashboard and select a module.");
         setLoading(false);
         return;
       }
@@ -39,16 +46,45 @@ export default function LearnerReaderPage() {
       try {
         setLoading(true);
         setError(null);
-        // Fetch course details
-        const data = await apiClient(`/courses/${courseIdParam}/`).catch(async () => {
-          // If single course lookup fails or permissions differ, fallback to query /courses/
-          const all = await apiClient("/courses/");
-          const list = Array.isArray(all) ? all : all?.results || [];
-          return list.find((c) => String(c.id) === String(courseIdParam));
-        });
+
+        let data = null;
+
+        if (hasValidCourseId) {
+          // Fetch course details
+          data = await apiClient(`/courses/${courseIdParam}/`).catch(async () => {
+            // If single course lookup fails or permissions differ, fallback to query /courses/
+            const all = await apiClient("/courses/");
+            const list = Array.isArray(all) ? all : all?.results || [];
+            return list.find((c) => String(c.id) === String(courseIdParam));
+          });
+        }
+
+        // If no courseId was provided (or course lookup returned nothing) and a valid moduleId exists,
+        // resolve context via the Module detail endpoint to support course-less / independent-Level modules.
+        if (!data && hasValidModuleId) {
+          const mod = await apiClient(`/modules/${moduleIdParam}/`).catch(() => null);
+          if (mod) {
+            if (mod.course) {
+              data = await apiClient(`/courses/${mod.course}/`).catch(() => null);
+            }
+            if (!data) {
+              data = {
+                id: mod.course || null,
+                name: mod.course_name || mod.level_name || mod.name || "Independent Level Curriculum",
+                title: mod.course_name || mod.level_name || mod.name || "Independent Level Curriculum",
+                status: mod.status || "PUBLISHED",
+                level_id: mod.level || null,
+              };
+            }
+          }
+        }
 
         if (!data) {
-          throw new Error(`Course #${courseIdParam} could not be loaded or is not assigned to you.`);
+          throw new Error(
+            hasValidCourseId
+              ? `Course #${courseIdParam} could not be loaded or is not assigned to you.`
+              : `Module #${moduleIdParam} could not be loaded or is not assigned to you.`
+          );
         }
 
         if (isMounted) {
@@ -57,7 +93,7 @@ export default function LearnerReaderPage() {
         }
       } catch (err) {
         if (isMounted) {
-          setError(err.message || "Failed to load course details.");
+          setError(err.message || "Failed to load learning content details.");
           setLoading(false);
         }
       }
@@ -68,7 +104,7 @@ export default function LearnerReaderPage() {
     return () => {
       isMounted = false;
     };
-  }, [courseIdParam]);
+  }, [courseIdParam, moduleIdParam]);
 
   const handleClose = () => {
     // Try to close tab if opened via window.open; fallback to navigating back to home portal
@@ -216,9 +252,11 @@ export default function LearnerReaderPage() {
           </div>
           <div style={{ minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-              <span className="badge badge-info" style={{ fontFamily: "var(--font-mono)", fontSize: "11px" }}>
-                {course.code || `CRS-${course.id}`}
-              </span>
+              {(course.code || course.id) && (
+                <span className="badge badge-info" style={{ fontFamily: "var(--font-mono)", fontSize: "11px" }}>
+                  {course.code || `CRS-${course.id}`}
+                </span>
+              )}
               <span
                 style={{
                   fontWeight: "600",
@@ -231,6 +269,11 @@ export default function LearnerReaderPage() {
               >
                 {course.name}
               </span>
+              {isAssessmentMode && (
+                <span className="badge badge-warning" style={{ fontSize: "11px", fontWeight: "700" }}>
+                  Assessment Mode
+                </span>
+              )}
               {isAdminPreview ? (
                 <span className="badge badge-purple" style={{ fontSize: "11px" }}>
                   Admin Preview
@@ -256,9 +299,9 @@ export default function LearnerReaderPage() {
               alignItems: "center",
               gap: "6px",
             }}
-            title="Close this learning tab"
+            title={isAssessmentMode ? "Exit Assessment and return to Dashboard" : "Close this learning tab"}
           >
-            <span>&larr; Return to Dashboard</span>
+            <span>&larr; {isAssessmentMode ? "Exit Assessment" : "Return to Dashboard"}</span>
           </button>
         </div>
       </header>
@@ -279,6 +322,7 @@ export default function LearnerReaderPage() {
           initialSubmoduleId={submoduleIdParam ? Number(submoduleIdParam) : null}
           onBack={handleClose}
           isStandaloneTab={true}
+          isAssessmentOnlyMode={isAssessmentMode}
         />
       </main>
     </div>

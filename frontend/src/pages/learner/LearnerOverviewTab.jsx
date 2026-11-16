@@ -8,6 +8,8 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
 
   const [courses, setCourses] = useState([]);
   const [modules, setModules] = useState([]);
+  const [courseLevels, setCourseLevels] = useState([]);
+  const [totalLmsModules, setTotalLmsModules] = useState(0);
   const [moduleProgressMap, setModuleProgressMap] = useState({});
   const [recentResponses, setRecentResponses] = useState([]);
   const [trainers, setTrainers] = useState([]);
@@ -20,21 +22,30 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
       setLoading(true);
       setError(null);
 
-      // Fetch assigned courses, modules, recent question responses, and assigned trainers in parallel
-      const [coursesRes, modulesRes, responsesRes, trainersRes] = await Promise.all([
+      // Fetch assigned courses, modules, LMS-wide total modules, recent question responses, and assigned trainers in parallel
+      const [coursesRes, modulesRes, levelsRes, totalModulesRes, responsesRes, trainersRes] = await Promise.all([
         apiClient("/courses/"),
         apiClient("/modules/"),
+        apiClient("/course-levels/").catch(() => []),
+        apiClient("/modules/total-count/").catch(() => null),
         apiClient("/question-responses/"),
         apiClient("/trainer-assignments/"),
       ]);
 
       const courseList = Array.isArray(coursesRes) ? coursesRes : (coursesRes?.results || []);
       const moduleList = Array.isArray(modulesRes) ? modulesRes : (modulesRes?.results || []);
+      const levelList = Array.isArray(levelsRes) ? levelsRes : (levelsRes?.results || []);
       const responseList = Array.isArray(responsesRes) ? responsesRes : (responsesRes?.results || []);
       const trainerList = Array.isArray(trainersRes) ? trainersRes : (trainersRes?.results || []);
 
       setCourses(courseList);
       setModules(moduleList);
+      setCourseLevels(levelList);
+      if (totalModulesRes && typeof totalModulesRes.total_modules === "number") {
+        setTotalLmsModules(totalModulesRes.total_modules);
+      } else {
+        setTotalLmsModules(moduleList.length);
+      }
       setRecentResponses(responseList);
       setTrainers(trainerList);
 
@@ -72,9 +83,11 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
         setLoading(true);
         setError(null);
 
-        const [coursesRes, modulesRes, responsesRes, trainersRes] = await Promise.all([
+        const [coursesRes, modulesRes, levelsRes, totalModulesRes, responsesRes, trainersRes] = await Promise.all([
           apiClient("/courses/"),
           apiClient("/modules/"),
+          apiClient("/course-levels/").catch(() => []),
+          apiClient("/modules/total-count/").catch(() => null),
           apiClient("/question-responses/"),
           apiClient("/trainer-assignments/"),
         ]);
@@ -83,11 +96,18 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
 
         const courseList = Array.isArray(coursesRes) ? coursesRes : (coursesRes?.results || []);
         const moduleList = Array.isArray(modulesRes) ? modulesRes : (modulesRes?.results || []);
+        const levelList = Array.isArray(levelsRes) ? levelsRes : (levelsRes?.results || []);
         const responseList = Array.isArray(responsesRes) ? responsesRes : (responsesRes?.results || []);
         const trainerList = Array.isArray(trainersRes) ? trainersRes : (trainersRes?.results || []);
 
         setCourses(courseList);
         setModules(moduleList);
+        setCourseLevels(levelList);
+        if (totalModulesRes && typeof totalModulesRes.total_modules === "number") {
+          setTotalLmsModules(totalModulesRes.total_modules);
+        } else {
+          setTotalLmsModules(moduleList.length);
+        }
         setRecentResponses(responseList);
         setTrainers(trainerList);
 
@@ -160,31 +180,58 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
     ? Math.round((completedModulesCount / totalAssignedModules) * 1000) / 10
     : 0.0;
 
-  // Compute per-course progress
-  const getCourseProgress = (courseId) => {
-    const courseModules = modules.filter((m) => {
-      if (typeof m.course === "object" && m.course !== null) {
-        return m.course.id === courseId;
-      }
-      return m.course === courseId;
+  // Helper to resolve all scoped modules belonging to a course (including hybrid modules via level)
+  const getModulesForCourse = (courseId) => {
+    const courseLevelIds = new Set(
+      courseLevels.filter((lvl) => lvl.course === courseId).map((lvl) => lvl.id)
+    );
+    return modules.filter((m) => {
+      const mCourseId =
+        typeof m.course === "object" && m.course !== null ? m.course.id : (m.course ?? m.course_id);
+      if (mCourseId === courseId) return true;
+      const mLevelId =
+        typeof m.level === "object" && m.level !== null ? m.level.id : (m.level ?? m.level_id);
+      if (!mCourseId && mLevelId && courseLevelIds.has(mLevelId)) return true;
+      return false;
     });
-
-    const totalMods = courseModules.length;
-    if (totalMods === 0) return { totalMods: 0, completedMods: 0, percentage: 0 };
-
-    let compMods = 0;
-    courseModules.forEach((m) => {
-      if (moduleProgressMap[m.id]?.is_module_completed) {
-        compMods += 1;
-      }
-    });
-
-    return {
-      totalMods,
-      completedMods: compMods,
-      percentage: Math.round((compMods / totalMods) * 100),
-    };
   };
+
+  // Build Continue Learning items: existing Course items + independent Level items (where course is null)
+  const continueLearningItems = (() => {
+    const items = courses.map((course) => ({
+      itemKey: `course-${course.id}`,
+      type: "COURSE",
+      course,
+      level: null,
+    }));
+
+    const courseIdsSet = new Set(courses.map((c) => c.id));
+    const independentLevels = courseLevels
+      .filter((lvl) => !lvl.course || !courseIdsSet.has(lvl.course))
+      .sort((a, b) => (a.order || 0) - (b.order || 0));
+
+    independentLevels.forEach((lvl) => {
+      const lvlMods = modules.filter((m) => {
+        const mLevelId =
+          typeof m.level === "object" && m.level !== null ? m.level.id : (m.level ?? m.level_id);
+        return mLevelId === lvl.id;
+      });
+      if (lvlMods.length > 0 || courses.length === 0) {
+        items.push({
+          itemKey: `level-${lvl.id}`,
+          type: "LEVEL",
+          course: {
+            id: null,
+            name: lvl.name,
+            status: "PUBLISHED",
+          },
+          level: lvl,
+        });
+      }
+    });
+
+    return items;
+  })();
 
   // If in Admin Preview mode, render generic preview without requesting learner-specific data
   if (isAdminPreview) {
@@ -202,9 +249,9 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
         {/* Generic Informational Cards Grid */}
         <div className="stats-grid" style={{ marginBottom: "28px" }}>
           <div className="stat-card">
-            <div className="stat-header">My Courses</div>
+            <div className="stat-header">Total Modules</div>
             <div className="stat-value">—</div>
-            <div className="stat-footer">Preview only • Active courses</div>
+            <div className="stat-footer">Preview only • Active modules</div>
           </div>
 
           <div className="stat-card">
@@ -311,9 +358,9 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
       {/* 1. Learning Summary Cards */}
       <div className="stats-grid" style={{ marginBottom: "28px" }}>
         <div className="stat-card">
-          <div className="stat-header">Assigned Courses</div>
-          <div className="stat-value">{totalAssignedCourses}</div>
-          <div className="stat-footer">Active learning programs</div>
+          <div className="stat-header">Total Modules</div>
+          <div className="stat-value">{totalLmsModules}</div>
+          <div className="stat-footer">Active curriculum modules</div>
         </div>
 
         <div className="stat-card">
@@ -500,7 +547,7 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
           <div>
             <h2 className="card-title" style={{ margin: 0 }}>
               <span>Continue Learning</span>
-              <span className="badge badge-purple">{courses.length}</span>
+              <span className="badge badge-purple">{continueLearningItems.length}</span>
             </h2>
             <p style={{ fontSize: "13px", color: "var(--text-secondary)", margin: "4px 0 0 0" }}>
               Pick up where you left off in your assigned curriculum
@@ -518,7 +565,7 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
           )}
         </div>
 
-        {courses.length === 0 ? (
+        {continueLearningItems.length === 0 ? (
           <div
             style={{
               textAlign: "center",
@@ -540,11 +587,78 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
               gap: "16px",
             }}
           >
-            {courses.map((course) => {
-              const { totalMods, completedMods, percentage } = getCourseProgress(course.id);
+            {continueLearningItems.map((item) => {
+              const { course, level: independentLevel, itemKey } = item;
+
+              // Filter all modules belonging to this course or independent level, sorted by order
+              const courseModules = independentLevel
+                ? modules
+                    .filter((m) => {
+                      const mLevelId =
+                        typeof m.level === "object" && m.level !== null ? m.level.id : (m.level ?? m.level_id);
+                      return mLevelId === independentLevel.id;
+                    })
+                    .sort((a, b) => (a.order || 0) - (b.order || 0))
+                : getModulesForCourse(course.id).sort((a, b) => (a.order || 0) - (b.order || 0));
+
+              const totalMods = courseModules.length;
+              let completedMods = 0;
+              courseModules.forEach((m) => {
+                if (moduleProgressMap[m.id]?.is_module_completed) {
+                  completedMods += 1;
+                }
+              });
+              const percentage = totalMods > 0 ? Math.round((completedMods / totalMods) * 100) : 0;
+
+              // Find the module to resume:
+              // 1. Prioritize a module that has been started/attempted but not yet completed
+              // 2. Otherwise pick the first incomplete module in sequence
+              let resumeModule = courseModules.find((m) => {
+                const status = moduleProgressMap[m.id];
+                const isCompleted = status?.is_module_completed === true;
+                const isInProgress = status?.result === "FAIL" || status?.result === "IN_PROGRESS" || (status?.verified_count > 0 && !isCompleted);
+                return !isCompleted && isInProgress;
+              });
+
+              if (!resumeModule) {
+                resumeModule = courseModules.find((m) => {
+                  const status = moduleProgressMap[m.id];
+                  return status?.is_module_completed !== true;
+                });
+              }
+
+              // Determine level for the course/resume module
+              const targetLevelId = independentLevel?.id || resumeModule?.level || resumeModule?.level_id;
+              let currentLevel = independentLevel || null;
+              if (!currentLevel && targetLevelId) {
+                currentLevel = courseLevels.find((lvl) => lvl.id === targetLevelId);
+              }
+              if (!currentLevel && course.id) {
+                currentLevel = courseLevels.find((lvl) => lvl.course === course.id) || null;
+              }
+
+              // Format Level title: Level {order or name} - "{level name or description}"
+              let levelDisplay = "Level 1";
+              if (currentLevel) {
+                const lvlName = currentLevel.name || `Level ${currentLevel.order || 1}`;
+                if (currentLevel.description) {
+                  levelDisplay = `${lvlName} – "${currentLevel.description.replace(/\.$/, "")}"`;
+                } else if (resumeModule?.level_name && resumeModule.level_name !== lvlName) {
+                  levelDisplay = `${lvlName} – "${resumeModule.level_name}"`;
+                } else {
+                  levelDisplay = lvlName;
+                }
+              } else if (resumeModule?.level_name) {
+                levelDisplay = resumeModule.level_name;
+              }
+
+              const resumeModuleName = resumeModule
+                ? (resumeModule.name || `Module ${resumeModule.order || ""}`).replace(/\.docx$/i, "")
+                : null;
+
               return (
                 <div
-                  key={course.id}
+                  key={itemKey}
                   style={{
                     backgroundColor: "var(--bg-surface)",
                     border: "1px solid var(--border-color)",
@@ -564,9 +678,11 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
                         marginBottom: "10px",
                       }}
                     >
-                      <span className="badge badge-info" style={{ fontFamily: "var(--font-mono)" }}>
-                        {course.code || `CRS-${course.id}`}
-                      </span>
+                      {(course.code || course.id) && (
+                        <span className="badge badge-info" style={{ fontFamily: "var(--font-mono)" }}>
+                          {course.code || `CRS-${course.id}`}
+                        </span>
+                      )}
                       {course.status && (
                         <span
                           className={`badge ${
@@ -578,36 +694,74 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
                       )}
                     </div>
 
-                    <h3
-                      style={{
-                        fontSize: "15px",
-                        fontWeight: "600",
-                        color: "var(--text-main)",
-                        margin: "0 0 6px 0",
-                        lineHeight: "1.3",
-                      }}
-                    >
-                      {course.name}
-                    </h3>
-
-                    {course.description && (
-                      <p
+                    {/* Level Display */}
+                    <div style={{ marginBottom: "8px" }}>
+                      <span
                         style={{
-                          fontSize: "12px",
-                          color: "var(--text-secondary)",
-                          lineHeight: "1.4",
-                          margin: "0 0 14px 0",
-                          display: "-webkit-box",
-                          WebkitLineClamp: 2,
-                          WebkitBoxOrient: "vertical",
-                          overflow: "hidden",
+                          fontSize: "11px",
+                          fontWeight: "700",
+                          textTransform: "uppercase",
+                          letterSpacing: "0.5px",
+                          color: "var(--accent-secondary)",
+                          display: "block",
+                          marginBottom: "2px",
                         }}
                       >
-                        {course.description}
-                      </p>
-                    )}
+                        Level
+                      </span>
+                      <h3
+                        style={{
+                          fontSize: "15px",
+                          fontWeight: "600",
+                          color: "var(--text-main)",
+                          margin: 0,
+                          lineHeight: "1.3",
+                        }}
+                      >
+                        {levelDisplay}
+                      </h3>
+                    </div>
 
-                    {/* Progress representation */}
+                    {/* Current Module to Resume */}
+                    <div
+                      style={{
+                        margin: "10px 0 14px 0",
+                        padding: "8px 10px",
+                        backgroundColor: "var(--bg-card)",
+                        border: "1px solid var(--border-color)",
+                        borderRadius: "6px",
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: "11px",
+                          fontWeight: "600",
+                          textTransform: "uppercase",
+                          color: "var(--text-secondary)",
+                          display: "block",
+                          marginBottom: "3px",
+                        }}
+                      >
+                        Current Module
+                      </span>
+                      <p
+                        style={{
+                          fontSize: "13px",
+                          fontWeight: "500",
+                          color: resumeModuleName ? "var(--text-main)" : "var(--status-success)",
+                          margin: 0,
+                          lineHeight: "1.35",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                        title={resumeModuleName || "All modules completed"}
+                      >
+                        {resumeModuleName ? resumeModuleName : "✓ All modules completed"}
+                      </p>
+                    </div>
+
+                    {/* Course Progress */}
                     <div style={{ margin: "12px 0 16px 0" }}>
                       <div
                         style={{
@@ -649,7 +803,9 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
                     type="button"
                     className="btn btn-primary"
                     onClick={() => {
-                      window.open(`/learner/reader?courseId=${course.id}`, "_blank");
+                      if (onNavigateToCourses) {
+                        onNavigateToCourses();
+                      }
                     }}
                     style={{
                       width: "100%",
@@ -662,7 +818,7 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
                       gap: "6px",
                     }}
                   >
-                    <span>{percentage > 0 ? "Continue Learning" : "View Course"}</span>
+                    <span>{percentage === 100 ? "Review Course" : "Continue Learning"}</span>
                     <span>&rarr;</span>
                   </button>
                 </div>
@@ -671,50 +827,6 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
           </div>
         )}
       </div>
-
-      {/* 4. Recent Learning Activity Section (only rendered when real activity data exists) */}
-      {recentResponses.length > 0 && (
-        <div className="card">
-          <div style={{ marginBottom: "16px" }}>
-            <h2 className="card-title" style={{ margin: 0 }}>
-              <span>Recent Learning Activity</span>
-              <span className="badge badge-info">{recentResponses.length}</span>
-            </h2>
-            <p style={{ fontSize: "13px", color: "var(--text-secondary)", margin: "4px 0 0 0" }}>
-              Your recent module question responses and submissions
-            </p>
-          </div>
-
-          <div className="table-container">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Question</th>
-                  <th>Your Answer</th>
-                  <th>Submitted At</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentResponses.slice(0, 5).map((resp) => (
-                  <tr key={resp.id}>
-                    <td style={{ color: "var(--text-main)", fontWeight: "500" }}>
-                      {resp.question_text || `Question #${resp.question}`}
-                    </td>
-                    <td>
-                      <span className={`badge ${resp.response_value ? "badge-success" : "badge-warning"}`}>
-                        {resp.response_value ? "Yes" : "No"}
-                      </span>
-                    </td>
-                    <td style={{ color: "var(--text-secondary)", fontSize: "12px" }}>
-                      {resp.submitted_at ? new Date(resp.submitted_at).toLocaleString() : "Recorded"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

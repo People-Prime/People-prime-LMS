@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { getTrainingFileDownloadUrl, apiClient } from "../../../services/api";
 import ActionMenu from "../../../components/common/ActionMenu";
+import SecurePdfViewer from "../../../components/common/SecurePdfViewer";
 
 const CATEGORY_COLORS = {
   PRIMARY_INSTRUCTIONAL: "badge-primary",
@@ -72,14 +73,11 @@ export default function CourseMaterialsView({
     const isDirectPreviewable = ["PDF", "DOCX", "DOC", "PNG", "JPG", "JPEG", "WEBP", "GIF"].includes(fileType);
 
     if (isDirectPreviewable) {
-      const previewUrl = ["PDF", "DOCX", "DOC"].includes(fileType)
-        ? `${downloadUrl}#toolbar=0&navpanes=0&scrollbar=1`
-        : downloadUrl;
       setPreviewingFile({
         id: fileId,
         filename: fileName,
         fileType,
-        url: previewUrl,
+        url: downloadUrl,
       });
     } else {
       setPreviewingFile({
@@ -447,7 +445,14 @@ export default function CourseMaterialsView({
                   <button
                     type="button"
                     className="btn btn-secondary"
-                    onClick={() => window.open(previewingFile.url, "_blank")}
+                    onClick={() =>
+                      window.open(
+                        `/viewer?fileId=${previewingFile.id}&title=${encodeURIComponent(
+                          previewingFile.filename
+                        )}`,
+                        "_blank"
+                      )
+                    }
                     style={{ padding: "4px 10px", fontSize: "12px" }}
                   >
                     Open in New Tab
@@ -467,16 +472,17 @@ export default function CourseMaterialsView({
             <div
               style={{
                 flex: 1,
+                minHeight: 0,
                 backgroundColor: "var(--bg-primary, #f1f5f9)",
                 overflow: "hidden",
                 display: "flex",
-                justifyContent: "center",
-                alignItems: "center",
-                padding: "20px",
+                flexDirection: "column",
+                position: "relative",
+                padding: "0",
               }}
             >
               {previewingFile.unsupported ? (
-                <div style={{ textAlign: "center", maxWidth: "420px" }}>
+                <div style={{ textAlign: "center", maxWidth: "420px", padding: "20px" }}>
                   <div style={{ fontSize: "36px", marginBottom: "12px" }}>📄</div>
                   <h4 style={{ fontSize: "16px", fontWeight: "600", color: "var(--text-main)", marginBottom: "8px" }}>
                     Preview Unavailable for this Format
@@ -490,15 +496,10 @@ export default function CourseMaterialsView({
                   src={previewingFile.url}
                   alt={previewingFile.filename}
                   style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
+                  onContextMenu={(e) => e.preventDefault()}
                 />
               ) : (
-                <iframe
-                  src={previewingFile.url}
-                  title={previewingFile.filename}
-                  className="lms-document-viewer-container"
-                  onContextMenu={(e) => e.preventDefault()}
-                  style={{ width: "100%", height: "100%", border: "none" }}
-                />
+                <SecurePdfViewer url={previewingFile.url} title={previewingFile.filename} />
               )}
             </div>
           </div>

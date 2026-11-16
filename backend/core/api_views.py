@@ -170,23 +170,35 @@ def _get_curriculum_targets(assignments):
     Given an assignments queryset, compute:
     1. assigned_crs_ids: courses directly assigned
     2. assigned_mod_ids: modules directly assigned
-    3. all_accessible_course_ids: assigned_crs_ids UNION courses containing directly assigned modules
+    3. all_accessible_course_ids: assigned_crs_ids UNION parent courses of assigned levels/modules
+    4. assigned_level_ids: levels directly assigned (returned in tuple slot 1)
+
+    Returns a 5-tuple (kept for caller compatibility):
+        (set(), assigned_level_ids, assigned_crs_ids, assigned_mod_ids, all_accessible_course_ids)
+    Only the exact assigned level IDs are returned; no other levels are implied.
     """
     assigned_crs_ids = set(assignments.filter(
         course__isnull=False
     ).values_list("course_id", flat=True))
 
+    assigned_level_ids = set(assignments.filter(
+        level__isnull=False
+    ).values_list("level_id", flat=True))
+
     assigned_mod_ids = set(assignments.filter(
         module__isnull=False
     ).values_list("module_id", flat=True))
 
-    # Parent courses of directly assigned modules
+    # Parent courses (where present) of directly assigned modules and levels
     mod_course_ids = set(Module.objects.filter(
-        id__in=assigned_mod_ids
+        id__in=assigned_mod_ids, course__isnull=False
+    ).values_list("course_id", flat=True))
+    level_course_ids = set(CourseLevel.objects.filter(
+        id__in=assigned_level_ids, course__isnull=False
     ).values_list("course_id", flat=True))
 
-    all_accessible_course_ids = assigned_crs_ids.union(mod_course_ids)
-    return set(), set(), assigned_crs_ids, assigned_mod_ids, all_accessible_course_ids
+    all_accessible_course_ids = assigned_crs_ids.union(mod_course_ids, level_course_ids)
+    return set(), assigned_level_ids, assigned_crs_ids, assigned_mod_ids, all_accessible_course_ids
 
 
 def _scope_course_qs(user):
@@ -215,12 +227,53 @@ def _scope_course_qs(user):
     return Course.objects.none()
 
 
+def _scope_level_qs(user):
+    """
+    Return a CourseLevel queryset scoped by role and active training assignments.
+    - ADMIN: all CourseLevels
+    - TRAINER: CourseLevels associated with PUBLISHED courses, or independent CourseLevels
+      (course is None) containing at least one PUBLISHED module
+    - LEARNER: CourseLevels explicitly assigned, belonging to directly assigned PUBLISHED courses,
+      or containing directly assigned PUBLISHED modules (without granting sibling levels)
+    """
+    role = _get_role(user)
+    if role == User.Role.ADMIN:
+        return CourseLevel.objects.all()
+
+    if role == User.Role.TRAINER:
+        return CourseLevel.objects.filter(
+            Q(course__status=PublicationStatus.PUBLISHED) |
+            Q(course__isnull=True, modules__status=PublicationStatus.PUBLISHED)
+        ).distinct()
+
+    if role == User.Role.LEARNER:
+        assignments = _get_active_learner_assignments(user)
+        _, assigned_level_ids, assigned_crs_ids, assigned_mod_ids, _ = _get_curriculum_targets(assignments)
+        published_mod_level_ids = set(
+            Module.objects.filter(
+                id__in=assigned_mod_ids,
+                status=PublicationStatus.PUBLISHED,
+            ).filter(
+                Q(course__isnull=True) | Q(course__status=PublicationStatus.PUBLISHED)
+            ).values_list("level_id", flat=True)
+        )
+        return CourseLevel.objects.filter(
+            Q(course__isnull=True) | Q(course__status=PublicationStatus.PUBLISHED)
+        ).filter(
+            Q(course_id__in=assigned_crs_ids) |
+            Q(id__in=assigned_level_ids) |
+            Q(id__in=published_mod_level_ids)
+        ).distinct()
+
+    return CourseLevel.objects.none()
+
+
 def _scope_module_qs(user):
     """
     Return a Module queryset scoped by role and active training assignments.
     - ADMIN: all modules
-    - TRAINER: all PUBLISHED modules within PUBLISHED courses
-    - LEARNER: PUBLISHED modules in assigned courses or directly assigned
+    - TRAINER: all PUBLISHED modules within PUBLISHED courses or independent levels
+    - LEARNER: PUBLISHED modules in assigned courses, levels, or directly assigned
     """
     role = _get_role(user)
     if role == User.Role.ADMIN:
@@ -229,16 +282,24 @@ def _scope_module_qs(user):
     if role == User.Role.TRAINER:
         return Module.objects.filter(
             status=PublicationStatus.PUBLISHED,
-            course__status=PublicationStatus.PUBLISHED,
+        ).filter(
+            Q(course__isnull=True) | Q(course__status=PublicationStatus.PUBLISHED)
+        ).filter(
+            Q(level__course__isnull=True) | Q(level__course__status=PublicationStatus.PUBLISHED)
         ).distinct()
 
     if role == User.Role.LEARNER:
         assignments = _get_active_learner_assignments(user)
-        _, _, assigned_crs_ids, assigned_mod_ids, _ = _get_curriculum_targets(assignments)
+        _, assigned_level_ids, assigned_crs_ids, assigned_mod_ids, _ = _get_curriculum_targets(assignments)
         return Module.objects.filter(
             status=PublicationStatus.PUBLISHED
         ).filter(
+            Q(course__isnull=True) | Q(course__status=PublicationStatus.PUBLISHED)
+        ).filter(
+            Q(level__course__isnull=True) | Q(level__course__status=PublicationStatus.PUBLISHED)
+        ).filter(
             Q(course_id__in=assigned_crs_ids) |
+            Q(level_id__in=assigned_level_ids) |
             Q(id__in=assigned_mod_ids)
         ).distinct()
 
@@ -249,8 +310,8 @@ def _scope_submodule_qs(user):
     """
     Return a Submodule queryset scoped by role and active training assignments.
     - ADMIN: all submodules
-    - TRAINER: all PUBLISHED submodules within PUBLISHED modules & courses
-    - LEARNER: PUBLISHED submodules in assigned courses or modules
+    - TRAINER: all PUBLISHED submodules within PUBLISHED modules & courses/independent levels
+    - LEARNER: PUBLISHED submodules in assigned courses, levels, or modules
     """
     role = _get_role(user)
     if role == User.Role.ADMIN:
@@ -260,16 +321,25 @@ def _scope_submodule_qs(user):
         return Submodule.objects.filter(
             status=PublicationStatus.PUBLISHED,
             module__status=PublicationStatus.PUBLISHED,
-            module__course__status=PublicationStatus.PUBLISHED,
+        ).filter(
+            Q(module__course__isnull=True) | Q(module__course__status=PublicationStatus.PUBLISHED)
+        ).filter(
+            Q(module__level__course__isnull=True) | Q(module__level__course__status=PublicationStatus.PUBLISHED)
         ).distinct()
 
     if role == User.Role.LEARNER:
         assignments = _get_active_learner_assignments(user)
-        _, _, assigned_crs_ids, assigned_mod_ids, _ = _get_curriculum_targets(assignments)
+        _, assigned_level_ids, assigned_crs_ids, assigned_mod_ids, _ = _get_curriculum_targets(assignments)
         return Submodule.objects.filter(
-            status=PublicationStatus.PUBLISHED
+            status=PublicationStatus.PUBLISHED,
+            module__status=PublicationStatus.PUBLISHED,
+        ).filter(
+            Q(module__course__isnull=True) | Q(module__course__status=PublicationStatus.PUBLISHED)
+        ).filter(
+            Q(module__level__course__isnull=True) | Q(module__level__course__status=PublicationStatus.PUBLISHED)
         ).filter(
             Q(module__course_id__in=assigned_crs_ids) |
+            Q(module__level_id__in=assigned_level_ids) |
             Q(module_id__in=assigned_mod_ids)
         ).distinct()
 
@@ -532,6 +602,84 @@ class CourseViewSet(viewsets.ModelViewSet):
 
 
 
+def _cleanup_unreferenced_training_files(training_file_ids):
+    """
+    Given a collection of TrainingFile IDs that were previously referenced by deleted mappings,
+    checks if each file has any remaining references in TrainingFileMapping LMS-wide.
+    If no references remain, deletes the TrainingFile DB record and removes the physical file from disk.
+    Never deletes shared files that are still referenced elsewhere.
+    """
+    for tf_id in set(training_file_ids):
+        if not tf_id:
+            continue
+        try:
+            # Check if referenced anywhere else
+            has_other_mappings = TrainingFileMapping.objects.filter(training_file_id=tf_id).exists()
+            if not has_other_mappings:
+                try:
+                    tf = TrainingFile.objects.get(pk=tf_id)
+                    file_path = tf.file.path if tf.file else None
+                    tf.delete()
+                    if file_path and os.path.exists(file_path):
+                        try:
+                            os.remove(file_path)
+                            logger.info("Permanently removed unreferenced training file from storage: %s", file_path)
+                        except OSError as os_err:
+                            logger.warning("Could not delete unreferenced file from disk at '%s': %s", file_path, str(os_err))
+                except TrainingFile.DoesNotExist:
+                    pass
+        except Exception as e:
+            logger.warning("Error checking or cleaning unreferenced TrainingFile %s: %s", tf_id, str(e))
+
+
+def _delete_module_and_cascade(module, request=None):
+    """
+    Permanently deletes a module and all its associated records:
+    - submodules
+    - associated assessment questions & responses
+    - assessment attempts
+    - learner progress records
+    - feedback and ratings
+    - training file mappings
+    - physical training files that are not referenced elsewhere.
+    Works for ANY status: DRAFT, PUBLISHED, ARCHIVED, In Progress, or Completed.
+    """
+    module_id = module.pk
+    module_name = module.name
+    course_id = module.course_id
+
+    # 1. Collect all TrainingFile IDs mapped to this module or its submodules
+    associated_submodule_ids = list(Submodule.objects.filter(module=module).values_list("id", flat=True))
+    file_ids = list(TrainingFileMapping.objects.filter(
+        Q(module=module) | Q(submodule_id__in=associated_submodule_ids)
+    ).values_list("training_file_id", flat=True).distinct())
+
+    with transaction.atomic():
+        # Log audit if request provided
+        if request:
+            _log_audit(
+                request,
+                AuditAction.DELETE,
+                "Module",
+                module_id,
+                {
+                    "name": module_name,
+                    "course": course_id,
+                    "status": module.status,
+                },
+            )
+        # Delete mappings directly
+        TrainingFileMapping.objects.filter(
+            Q(module=module) | Q(submodule_id__in=associated_submodule_ids)
+        ).delete()
+
+        # Delete the module (Django cascades submodules, questions, attempts, responses, progress, feedback, assignments)
+        module.delete()
+
+    # 2. Safely clean up unreferenced physical training files after DB commit
+    _cleanup_unreferenced_training_files(file_ids)
+
+
 class CourseLevelViewSet(viewsets.ModelViewSet):
     """
     CRUD endpoints for CourseLevel entities (e.g., Level 1, Level 2, Level 3).
@@ -549,19 +697,7 @@ class CourseLevelViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("LMS Admin role required.")
 
     def get_queryset(self):
-        user = self.request.user
-        role = _get_role(user)
-
-        # Base queryset scoped by course accessibility
-        if role == User.Role.ADMIN:
-            qs = CourseLevel.objects.all()
-        elif role == User.Role.TRAINER:
-            qs = CourseLevel.objects.filter(course__status=PublicationStatus.PUBLISHED)
-        elif role == User.Role.LEARNER:
-            accessible_courses = _scope_course_qs(user)
-            qs = CourseLevel.objects.filter(course__in=accessible_courses)
-        else:
-            qs = CourseLevel.objects.none()
+        qs = _scope_level_qs(self.request.user)
 
         course_id = self.request.query_params.get("course") or self.request.query_params.get("course_id")
         if course_id:
@@ -604,29 +740,33 @@ class CourseLevelViewSet(viewsets.ModelViewSet):
         return self.update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
+        """
+        Permanently deletes a CourseLevel and all its associated modules, submodules,
+        content, questions, attempts, responses, progress, feedback, and unreferenced files.
+        Works regardless of level status, published modules, or learner enrollments.
+        """
         self._require_admin()
         instance = self.get_object()
-
-        # Enforce that only empty levels (zero modules assigned) can be deleted
-        assigned_modules_count = instance.modules.count()
-        if assigned_modules_count > 0:
-            return Response(
-                {
-                    "error": f"Cannot delete level '{instance.name}' because it contains {assigned_modules_count} module(s). Reassign or unassign all modules before deleting this level."
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
         level_name = instance.name
         level_id = instance.id
         course_id = instance.course_id
+
+        # Cascade delete all modules assigned to this level
+        modules_in_level = list(instance.modules.all())
+        for m in modules_in_level:
+            _delete_module_and_cascade(m, request=request)
 
         _log_audit(
             request,
             AuditAction.DELETE,
             "CourseLevel",
             level_id,
-            {"name": level_name, "course": course_id},
+            {
+                "name": level_name,
+                "course": course_id,
+                "cascaded_modules_count": len(modules_in_level),
+            },
         )
         instance.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -665,7 +805,7 @@ class ModuleViewSet(viewsets.ModelViewSet):
             AuditAction.CREATE,
             "Module",
             module.pk,
-            {"name": module.name, "code": module.code, "course": module.course_id},
+            {"name": module.name, "course": module.course_id},
         )
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
@@ -681,7 +821,7 @@ class ModuleViewSet(viewsets.ModelViewSet):
             AuditAction.UPDATE,
             "Module",
             module.pk,
-            {"name": module.name, "code": module.code},
+            {"name": module.name},
         )
         return Response(serializer.data)
 
@@ -690,43 +830,23 @@ class ModuleViewSet(viewsets.ModelViewSet):
         return self.update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
+        """
+        Permanently deletes a module and all its associated records:
+        submodules, questions, attempts, responses, progress, feedback, assignments,
+        and unreferenced physical files. Works for Draft, Published, Active, and Completed content.
+        """
         self._require_admin()
         instance = self.get_object()
 
-        if instance.status == PublicationStatus.ARCHIVED:
-            return Response(
-                {"error": "Archived modules cannot be deleted."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
         try:
-            with transaction.atomic():
-                locked_module = Module.objects.select_for_update().get(pk=instance.pk)
-                _log_audit(
-                    request,
-                    AuditAction.DELETE,
-                    "Module",
-                    locked_module.pk,
-                    {
-                        "name": locked_module.name,
-                        "code": locked_module.code,
-                        "course": locked_module.course_id,
-                        "status": locked_module.status,
-                    },
-                )
-                locked_module.delete()
-        except Module.DoesNotExist:
-            return Response(
-                {"error": "Module not found or already deleted."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            _delete_module_and_cascade(instance, request=request)
+            return Response(status=status.HTTP_204_NO_CONTENT)
         except Exception as e:
             logger.exception("Unexpected error occurred while deleting Module ID %s: %s", instance.pk, str(e))
             return Response(
-                {"error": "Failed to delete module due to an internal server error. Please try again or contact system administration."},
+                {"error": f"Failed to permanently delete module: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["get"], url_path="deletion-impact")
     def deletion_impact(self, request, pk=None):
@@ -748,13 +868,20 @@ class ModuleViewSet(viewsets.ModelViewSet):
         materials_mappings_count = TrainingFileMapping.objects.filter(module=instance).count()
         progress_count = LearnerSubmoduleProgress.objects.filter(submodule__module=instance).count()
 
+        course_name = (
+            instance.course.name
+            if instance.course
+            else (instance.level.name if instance.level else "Independent Curriculum")
+        )
+
         return Response({
             "module_id": instance.id,
             "name": instance.name,
-            "code": instance.code,
             "status": instance.status,
             "course_id": instance.course_id,
-            "course_name": instance.course.name if instance.course else "Unknown",
+            "course_name": course_name,
+            "level_id": instance.level_id,
+            "level_name": instance.level.name if instance.level else None,
             "submodules_count": submodules_count,
             "assignments_count": assignments_count,
             "questions_count": questions_count,
@@ -764,6 +891,354 @@ class ModuleViewSet(viewsets.ModelViewSet):
             "materials_mappings_count": materials_mappings_count,
             "progress_count": progress_count,
         }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["get"], url_path="total-count")
+    def total_count(self, request):
+        """
+        Return the dynamic, LMS-wide total count of modules present in the database.
+        Accessible to all authenticated users (Admin, Trainer, Learner) for consistent dashboard display.
+        """
+        total = Module.objects.count()
+        return Response({"total_modules": total})
+
+    @action(detail=False, methods=["post"], url_path="insert")
+    def insert_module(self, request):
+        """
+        Insert a module at any position within a level or course:
+        - "beginning": at the start of the level
+        - "before": before a reference module
+        - "after": after a reference module
+        - "end": at the end of the level
+        Automatically adjusts module orders to prevent duplicate or conflicting orders.
+        """
+        self._require_admin()
+        data = request.data
+        course_id = data.get("course")
+        level_id = data.get("level")
+        name = data.get("name", "").strip()
+        description = data.get("description", "").strip()
+        raw_duration = data.get("estimated_duration_minutes")
+        if raw_duration is None or str(raw_duration).strip() == "":
+            duration = 0
+        else:
+            try:
+                duration = max(0, int(raw_duration))
+            except (ValueError, TypeError):
+                duration = 0
+        status_val = data.get("status", PublicationStatus.DRAFT)
+        position = data.get("position", "end") # "beginning" | "before" | "after" | "end"
+        ref_module_id = data.get("reference_module_id")
+
+        if not name or (not course_id and not level_id):
+            return Response(
+                {"error": "Module Name and Level (or Course) are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        course = None
+        if course_id:
+            try:
+                course = Course.objects.get(pk=course_id)
+            except Course.DoesNotExist:
+                return Response({"error": "Selected Course does not exist."}, status=status.HTTP_404_NOT_FOUND)
+
+        level = None
+        if level_id:
+            try:
+                level = CourseLevel.objects.get(pk=level_id)
+            except CourseLevel.DoesNotExist:
+                return Response({"error": "Selected Level does not exist."}, status=status.HTTP_404_NOT_FOUND)
+            if course and level.course_id and level.course_id != course.id:
+                return Response({"error": "Selected Level does not exist in this course."}, status=status.HTTP_404_NOT_FOUND)
+
+        with transaction.atomic():
+            scope_qs = Module.objects.filter(course=course) if course else Module.objects.filter(level=level)
+            course_modules = list(scope_qs.order_by("order", "id"))
+
+            # Determine level subset if level provided
+            level_modules = [m for m in course_modules if m.level_id == (level.id if level else None)]
+
+            target_order = 1
+            if position == "beginning":
+                if level_modules:
+                    target_order = level_modules[0].order
+                elif course_modules:
+                    target_order = course_modules[0].order
+                else:
+                    target_order = 1
+
+            elif position == "before" and ref_module_id:
+                try:
+                    ref_mod = scope_qs.get(pk=ref_module_id)
+                    target_order = ref_mod.order
+                except Module.DoesNotExist:
+                    target_order = 1
+
+            elif position == "after" and ref_module_id:
+                try:
+                    ref_mod = scope_qs.get(pk=ref_module_id)
+                    target_order = ref_mod.order + 1
+                except Module.DoesNotExist:
+                    target_order = (course_modules[-1].order + 1) if course_modules else 1
+
+            else: # "end"
+                if level_modules:
+                    target_order = level_modules[-1].order + 1
+                elif course_modules:
+                    target_order = course_modules[-1].order + 1
+                else:
+                    target_order = 1
+
+            # Step 1: Temporarily shift all modules with order >= target_order to avoid unique constraint collisions
+            # Using offset of +100000
+            modules_to_shift = scope_qs.filter(order__gte=target_order).order_by("-order")
+            for m in modules_to_shift:
+                m.order = m.order + 100000
+                m.save(update_fields=["order"])
+
+            # Step 2: Create new module at target_order
+            new_module = Module.objects.create(
+                course=course,
+                level=level,
+                name=name,
+                description=description,
+                order=target_order,
+                estimated_duration_minutes=duration,
+                status=status_val,
+                created_by=request.user,
+            )
+
+            # Step 3: Shift shifted modules to their final (old_order + 1)
+            for m in scope_qs.filter(order__gte=100000).order_by("order"):
+                m.order = (m.order - 100000) + 1
+                m.save(update_fields=["order"])
+
+            _log_audit(
+                request,
+                AuditAction.CREATE,
+                "Module",
+                new_module.pk,
+                {"name": new_module.name, "order": new_module.order, "level": level.id if level else None},
+            )
+
+            serializer = self.get_serializer(new_module)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["post"], url_path="reorder")
+    def reorder_modules(self, request):
+        """
+        Reorder modules within a level or course.
+        Receives an array of module IDs in their new desired order:
+        { "level_id": <int>, "module_ids": [<int>, <int>, ...] }
+        Atomically updates the orders while preserving global unique ordering.
+        """
+        self._require_admin()
+        data = request.data
+        module_ids = data.get("module_ids", [])
+        level_id = data.get("level_id")
+
+        if not module_ids or not isinstance(module_ids, list):
+            return Response({"error": "A list of 'module_ids' is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        modules_to_reorder = list(Module.objects.filter(id__in=module_ids))
+        if len(modules_to_reorder) != len(module_ids):
+            return Response({"error": "One or more module IDs could not be found."}, status=status.HTTP_400_BAD_REQUEST)
+
+        course = modules_to_reorder[0].course
+        audit_target_id = course.pk if course else (level_id or modules_to_reorder[0].level_id)
+
+        with transaction.atomic():
+            # Get the existing order slots occupied by these modules in this level/course
+            # Sort original modules by their current order to preserve the numeric slot range
+            current_slots = sorted([m.order for m in modules_to_reorder])
+
+            # Map the new order of module_ids to these exact current slots
+            # Move all to temporary safe offset first (+200000) to prevent unique constraint conflicts
+            for m in modules_to_reorder:
+                m.order = m.order + 200000
+                m.save(update_fields=["order"])
+
+            # Reassign each module according to the requested index
+            for idx, mod_id in enumerate(module_ids):
+                m = next(item for item in modules_to_reorder if item.id == mod_id)
+                assigned_order = current_slots[idx]
+                m.order = assigned_order
+                m.save(update_fields=["order"])
+
+            _log_audit(
+                request,
+                AuditAction.UPDATE,
+                "Module",
+                audit_target_id,
+                {"action": "REORDER_MODULES", "reordered_ids": module_ids},
+            )
+
+        return Response({"message": "Modules reordered successfully.", "module_ids": module_ids}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="upload-content")
+    def upload_content(self, request, pk=None):
+        """
+        Directly uploads a file (Word, PDF, PPTX, image, etc.) and attaches it to this module.
+        Optionally links to a specific submodule if 'submodule_id' is supplied.
+        Automatically manages TrainingFile creation and TrainingFileMapping connection.
+        """
+        self._require_admin()
+        module = self.get_object()
+        file_obj = request.FILES.get("file") or request.FILES.get("files")
+        if not file_obj:
+            return Response({"error": "No content file was uploaded."}, status=status.HTTP_400_BAD_REQUEST)
+
+        submodule_id = request.data.get("submodule_id")
+        valid_categories = {c[0] for c in TrainingFileMapping._meta.get_field("category").choices}
+        raw_cat = request.data.get("category", "PRIMARY_INSTRUCTIONAL")
+        category = raw_cat if raw_cat in valid_categories else "PRIMARY_INSTRUCTIONAL"
+        notes = request.data.get("notes", "").strip()
+
+        submodule = None
+        if submodule_id:
+            try:
+                submodule = Submodule.objects.get(pk=submodule_id, module=module)
+            except Submodule.DoesNotExist:
+                return Response({"error": "The specified lesson does not belong to this module."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Compute SHA-256
+        sha256 = hashlib.sha256()
+        for chunk in file_obj.chunks():
+            sha256.update(chunk)
+        digest = sha256.hexdigest()
+        file_size = file_obj.size
+        orig_filename = file_obj.name
+
+        ext = os.path.splitext(orig_filename)[1].lstrip(".").upper() or "DOCX"
+
+        with transaction.atomic():
+            # Resolve target TrainingCluster deterministically before creating TrainingFile
+            explicit_cluster_id = request.data.get("cluster_id") or request.data.get("cluster")
+            target_course = module.course or (module.level.course if module.level_id and module.level else None)
+
+            cluster = None
+            if explicit_cluster_id:
+                try:
+                    cluster_qs = TrainingCluster.objects.filter(pk=int(explicit_cluster_id))
+                    if target_course is not None:
+                        cluster_qs = cluster_qs.filter(course=target_course)
+                    else:
+                        cluster_qs = cluster_qs.filter(code__iexact="CLUSTER-1")
+                    cluster = cluster_qs.get()
+                except (ValueError, TypeError, TrainingCluster.DoesNotExist):
+                    return Response(
+                        {"error": "The specified training cluster does not exist or is not valid for this module."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            elif target_course is not None:
+                c1_matches = list(
+                    TrainingCluster.objects.filter(course=target_course, code__iexact="CLUSTER-1").order_by("id")[:2]
+                )
+                if len(c1_matches) == 1:
+                    cluster = c1_matches[0]
+                elif len(c1_matches) > 1:
+                    return Response(
+                        {"error": "Multiple 'CLUSTER-1' records exist for this course; please specify a valid 'cluster_id'."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                else:
+                    code_for_course = f"CLUSTER-{target_course.id}"
+                    code_matches = list(
+                        TrainingCluster.objects.filter(course=target_course, code__iexact=code_for_course).order_by("id")[:2]
+                    )
+                    order_matches = list(
+                        TrainingCluster.objects.filter(course=target_course, order=1).order_by("id")[:2]
+                    )
+                    if len(code_matches) == 1:
+                        cluster = code_matches[0]
+                    elif len(code_matches) > 1:
+                        return Response(
+                            {"error": "Multiple matching clusters exist for this course; please specify a valid 'cluster_id'."},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    elif len(order_matches) == 1:
+                        cluster = order_matches[0]
+                    elif len(order_matches) > 1:
+                        return Response(
+                            {"error": "Multiple order=1 clusters exist for this course; please specify a valid 'cluster_id'."},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    elif TrainingCluster.objects.filter(course=target_course).exists():
+                        return Response(
+                            {"error": "Existing non-default cluster(s) found for this course; please specify an explicit 'cluster_id'."},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    else:
+                        cluster, _ = TrainingCluster.objects.get_or_create(
+                            course=target_course,
+                            code=code_for_course,
+                            defaults={
+                                "name": f"{target_course.name} - General Materials",
+                                "order": 1,
+                            },
+                        )
+            else:
+                # Course-less module (module.course is None and module.level.course is None):
+                # Preserve existing CLUSTER-1 association deterministically; do not invent clusters.
+                c1_matches = list(TrainingCluster.objects.filter(code__iexact="CLUSTER-1").order_by("id")[:2])
+                if len(c1_matches) == 1:
+                    cluster = c1_matches[0]
+                elif len(c1_matches) > 1:
+                    return Response(
+                        {"error": "Multiple 'CLUSTER-1' records exist; please specify a valid 'cluster_id'."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                else:
+                    return Response(
+                        {"error": "Cannot upload content for a course-less module because 'CLUSTER-1' does not exist."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            # Check if TrainingFile with identical checksum already exists to reuse physical storage
+            tf = TrainingFile.objects.filter(checksum=digest).first()
+            if not tf:
+                tf = TrainingFile.objects.create(
+                    file=file_obj,
+                    filename=orig_filename,
+                    relative_path=orig_filename,
+                    file_type=ext,
+                    file_size=file_size,
+                    checksum=digest,
+                    uploaded_by=request.user,
+                )
+
+            # Create or update mapping
+            mapping, created = TrainingFileMapping.objects.get_or_create(
+                training_file=tf,
+                cluster=cluster,
+                module=module,
+                submodule=submodule,
+                defaults={"category": category, "notes": notes},
+            )
+            if not created:
+                mapping.category = category
+                if notes:
+                    mapping.notes = notes
+                mapping.save(update_fields=["category", "notes"])
+
+            _log_audit(
+                request,
+                AuditAction.CREATE if created else AuditAction.UPDATE,
+                "TrainingFileMapping",
+                mapping.pk,
+                {"filename": orig_filename, "module_id": module.pk, "submodule_id": submodule.pk if submodule else None},
+            )
+
+        return Response({
+            "message": f"Content '{orig_filename}' uploaded and attached successfully.",
+            "file_id": tf.id,
+            "filename": tf.filename,
+            "mapping_id": mapping.id,
+            "cluster_id": cluster.id,
+            "cluster_code": cluster.code,
+            "module_id": module.id,
+            "submodule_id": submodule.id if submodule else None,
+        }, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['get'], url_path='materials')
     def materials(self, request, pk=None):
@@ -924,6 +1399,7 @@ class ModuleViewSet(viewsets.ModelViewSet):
                 response["Content-Length"] = preview_file_size
                 response["Cache-Control"] = "private, no-cache, no-store, must-revalidate"
                 response["X-Content-Type-Options"] = "nosniff"
+                response["X-Frame-Options"] = "SAMEORIGIN"
                 return response
             except Exception as e:
                 logger.error("DOCX preview generation error for training file %s: %s", tf.id, e)
@@ -1272,6 +1748,7 @@ class SubmoduleViewSet(viewsets.ModelViewSet):
                 response["Content-Length"] = preview_file_size
                 response["Cache-Control"] = "private, no-cache, no-store, must-revalidate"
                 response["X-Content-Type-Options"] = "nosniff"
+                response["X-Frame-Options"] = "SAMEORIGIN"
                 return response
             except Exception as e:
                 logger.error("DOCX preview generation error for training file %s: %s", tf.id, e)
@@ -1549,6 +2026,7 @@ class SubmoduleViewSet(viewsets.ModelViewSet):
                 response["Content-Length"] = preview_file_size
                 response["Cache-Control"] = "private, no-cache, no-store, must-revalidate"
                 response["X-Content-Type-Options"] = "nosniff"
+                response["X-Frame-Options"] = "SAMEORIGIN"
                 return response
             except Exception as e:
                 logger.error("DOCX preview generation error for training file %s: %s", tf.id, e)
@@ -2440,13 +2918,17 @@ class ModuleQuestionResponseViewSet(viewsets.ModelViewSet):
         )
 
         answered_count = len(answered_required_ids)
-        is_completed = (
-            total_required > 0
-            and answered_count == total_required
-        )
 
         # All questions count (all active questions are mandatory)
         all_questions_count = ModuleQuestion.objects.filter(module=module, is_active=True).count()
+        # A module is an assessment (tested) module if it has at least 5 questions (assessment mode)
+        # Or has multiple choice questions where total_questions >= 5
+        has_mcq_questions = ModuleQuestion.objects.filter(
+            module=module,
+            is_active=True,
+            question_type="MULTIPLE_CHOICE",
+        ).exists()
+        is_tested_module = (all_questions_count >= 5) or (has_mcq_questions and all_questions_count >= 5)
         
         # Latest attempt answered count, or unique distinct active questions answered across attempts capped at total
         latest_attempt_obj = ModuleAssessmentAttempt.objects.filter(module=module, learner=target_learner).order_by("-attempt_number").first()
@@ -2464,6 +2946,50 @@ class ModuleQuestionResponseViewSet(viewsets.ModelViewSet):
         attempts_list = ModuleAssessmentAttemptSerializer(attempts_qs, many=True).data
         latest_attempt = attempts_list[0] if attempts_list else None
 
+        # Assessment pass/fail logic:
+        # Minimum passing score is 3/5 (60%).
+        # If the module has assessment questions, it is COMPLETED ONLY when the learner has achieved score >= 3.0.
+        # A passing score from any attempt permanently marks the module completed.
+        best_attempt = ModuleAssessmentAttempt.objects.filter(module=module, learner=target_learner).order_by("-score").first()
+        best_score = best_attempt.score if best_attempt else None
+        has_passed = bool(best_score is not None and best_score >= 3.0)
+
+        latest_attempt_completed = bool(latest_attempt_obj and latest_attempt_obj.is_completed)
+        latest_score = latest_attempt_obj.score if latest_attempt_obj else None
+
+        if is_tested_module:
+            is_completed = has_passed
+            if has_passed:
+                result_status = "PASS"
+            elif latest_attempt_completed:
+                result_status = "FAIL"
+            elif all_answered_count > 0 or (latest_attempt_obj and not latest_attempt_completed):
+                result_status = "IN_PROGRESS"
+            else:
+                result_status = "NOT_STARTED"
+        else:
+            is_completed = (total_required > 0 and answered_count == total_required)
+            result_status = "PASS" if is_completed else ("IN_PROGRESS" if answered_count > 0 else "NOT_STARTED")
+
+        # Retake eligibility: if already passed, retakes are locked/not needed
+        can_retake = False
+        if is_tested_module:
+            if not has_passed and latest_attempt_completed:
+                # Check submodule review rules
+                published_submodules = list(Submodule.objects.filter(module=module, status=PublicationStatus.PUBLISHED))
+                target_att_num = (latest_attempt_obj.attempt_number + 1) if latest_attempt_obj else 1
+                completed_submod_ids = set(LearnerSubmoduleProgress.objects.filter(
+                    learner=target_learner,
+                    submodule__in=published_submodules,
+                    target_attempt_number=target_att_num,
+                    is_completed=True,
+                ).values_list("submodule_id", flat=True))
+                if len(completed_submod_ids) >= len(published_submodules):
+                    can_retake = True
+
+        marks_obtained = int(latest_score) if latest_score is not None else (int(best_score) if best_score is not None else 0)
+        total_marks = int(latest_attempt_obj.total_possible) if latest_attempt_obj else (all_questions_count or 5)
+
         return Response({
             "module_id": module.id,
             "module_name": module.name,
@@ -2472,6 +2998,12 @@ class ModuleQuestionResponseViewSet(viewsets.ModelViewSet):
             "total_required_questions": total_required,
             "answered_required_questions": answered_count,
             "is_module_completed": is_completed,
+            "is_tested_module": is_tested_module,
+            "has_passed": has_passed,
+            "marks_obtained": marks_obtained,
+            "total_marks": total_marks,
+            "result": result_status,
+            "can_retake": can_retake,
             "total_questions": all_questions_count,
             "total_answered_questions": all_answered_count,
             "latest_attempt": latest_attempt,
@@ -2524,10 +3056,17 @@ class ModuleQuestionResponseViewSet(viewsets.ModelViewSet):
             learner=target_learner,
         ).order_by("-attempt_number").first()
 
+        # Check if learner has already passed the assessment (score >= 3.0 on any attempt)
+        best_attempt = ModuleAssessmentAttempt.objects.filter(module=module, learner=target_learner).order_by("-score").first()
+        has_passed = bool(best_attempt and best_attempt.score is not None and best_attempt.score >= 3.0)
+
         blocking_reasons = []
 
         if active_questions_count == 0:
             blocking_reasons.append("This module has no assessment questions configured.")
+
+        if has_passed:
+            blocking_reasons.append("You have already passed this assessment. Retakes are locked.")
 
         if not latest_attempt:
             current_attempt_number = 0
@@ -2636,6 +3175,14 @@ class ModuleQuestionResponseViewSet(viewsets.ModelViewSet):
             if active_questions_count == 0:
                 return Response(
                     {"error": "This module has no assessment questions configured. Retakes are not available."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Check if learner has already passed the assessment
+            best_attempt = ModuleAssessmentAttempt.objects.filter(module=module, learner=request.user).order_by("-score").first()
+            if best_attempt and best_attempt.score is not None and best_attempt.score >= 3.0:
+                return Response(
+                    {"error": "You have already passed this assessment (score >= 3/5). Further retakes are locked."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -2837,17 +3384,22 @@ def _get_distinct_assigned_modules_for_learner(learner):
     """
     Returns a distinct queryset of published Modules assigned to *learner*
     via active TrainingAssignment (matching learner's active LearnerGroup, CandidateType, or direct individual assignment).
+    Supports Course, Level, and direct Module targets, including course-less Modules.
     """
     assignments = _get_active_learner_assignments(learner)
-    _, _, assigned_crs_ids, assigned_mod_ids, _ = _get_curriculum_targets(assignments)
+    _, assigned_level_ids, assigned_crs_ids, assigned_mod_ids, _ = _get_curriculum_targets(assignments)
 
     return Module.objects.filter(
         status=PublicationStatus.PUBLISHED,
-        course__status=PublicationStatus.PUBLISHED,
+    ).filter(
+        Q(course__isnull=True) | Q(course__status=PublicationStatus.PUBLISHED)
+    ).filter(
+        Q(level__course__isnull=True) | Q(level__course__status=PublicationStatus.PUBLISHED)
     ).filter(
         Q(course_id__in=assigned_crs_ids) |
+        Q(level_id__in=assigned_level_ids) |
         Q(id__in=assigned_mod_ids)
-    ).select_related("course").distinct()
+    ).select_related("course", "level").distinct()
 
 
 def _calculate_learner_progress_metrics(learner, assigned_modules):
@@ -2888,6 +3440,28 @@ def _calculate_learner_progress_metrics(learner, assigned_modules):
 
     answered_q_set = set(learner_responses)
 
+    # Pre-fetch assessment attempts for these modules
+    attempts = ModuleAssessmentAttempt.objects.filter(
+        module_id__in=module_ids,
+        learner=learner,
+    ).values("module_id", "score")
+
+    # Map module_id -> max_score
+    module_best_score_map = {}
+    for att in attempts:
+        mid = att["module_id"]
+        sc = att["score"]
+        if sc is not None:
+            if mid not in module_best_score_map or sc > module_best_score_map[mid]:
+                module_best_score_map[mid] = sc
+
+    # Find which modules are tested modules (have MCQ / assessment questions)
+    mcq_module_ids = set(ModuleQuestion.objects.filter(
+        module_id__in=module_ids,
+        is_active=True,
+        question_type="MULTIPLE_CHOICE",
+    ).values_list("module_id", flat=True))
+
     completed_count = 0
     module_details = []
 
@@ -2896,14 +3470,34 @@ def _calculate_learner_progress_metrics(learner, assigned_modules):
         total_required = len(req_q_set)
         answered_required = len(req_q_set.intersection(answered_q_set))
 
-        is_completed = (total_required > 0 and answered_required == total_required)
+        # Check pass status if module is tested assessment (5 questions)
+        if total_required >= 5:
+            best_sc = module_best_score_map.get(m.id)
+            is_completed = (best_sc is not None and best_sc >= 3.0)
+        else:
+            is_completed = (total_required > 0 and answered_required == total_required)
+
         if is_completed:
             completed_count += 1
+
+        course_info = (
+            {"id": m.course.id, "name": m.course.name}
+            if m.course is not None
+            else {"id": None, "name": None}
+        )
+        level_info = (
+            {"id": m.level.id, "name": m.level.name, "order": m.level.order}
+            if getattr(m, "level", None) is not None
+            else {"id": None, "name": None, "order": None}
+        )
 
         module_details.append({
             "id": m.id,
             "name": m.name,
-            "course": {"id": m.course.id, "name": m.course.name},
+            "course": course_info,
+            "level": level_info,
+            "level_id": level_info["id"],
+            "level_name": level_info["name"],
             "total_required_questions": total_required,
             "answered_required_questions": answered_required,
             "is_completed": is_completed,
@@ -3061,6 +3655,8 @@ class TrainerLearnerOverviewViewSet(viewsets.ViewSet):
                     "module_name": item["name"],
                     "course_id": item["course"]["id"],
                     "course_name": item["course"]["name"],
+                    "level_id": item["level"]["id"],
+                    "level_name": item["level"]["name"],
                     "total_required_questions": item["total_required_questions"],
                     "answered_required_questions": item["answered_required_questions"],
                     "is_completed": item["is_completed"],
@@ -3441,7 +4037,12 @@ class AdminOversightViewSet(viewsets.ViewSet):
 
         # 4. Bulk fetch Users and Modules to eliminate N+1 queries
         users_by_id = {u.id: u for u in User.objects.filter(id__in=needed_learner_ids)}
-        modules_by_id = {m.id: m for m in Module.objects.filter(id__in=needed_module_ids).select_related("course")}
+        modules_by_id = {
+            m.id: m
+            for m in Module.objects.filter(id__in=needed_module_ids).select_related(
+                "course", "level", "level__course"
+            )
+        }
 
         items = []
         for pair in in_progress_pairs:
@@ -3451,8 +4052,15 @@ class AdminOversightViewSet(viewsets.ViewSet):
                 continue
 
             learner_name = learner.get_full_name().strip() or learner.username
-            course_name = module.course.name if module.course else "Unknown Course"
-            course_id = module.course.id if module.course else 0
+            effective_course = module.course or (module.level.course if module.level else None)
+            level_id = module.level.id if module.level else None
+            level_name = module.level.name if module.level else None
+            course_id = effective_course.id if effective_course else None
+            course_name = (
+                effective_course.name
+                if effective_course
+                else (level_name or "Independent Module")
+            )
 
             items.append({
                 "learner_id": learner.id,
@@ -3461,6 +4069,8 @@ class AdminOversightViewSet(viewsets.ViewSet):
                 "learner_email": learner.email or "",
                 "course_id": course_id,
                 "course_name": course_name,
+                "level_id": level_id,
+                "level_name": level_name,
                 "module_id": module.id,
                 "module_name": module.name,
                 "total_required_questions": pair["total_required_questions"],
@@ -3470,7 +4080,7 @@ class AdminOversightViewSet(viewsets.ViewSet):
             })
 
         # Sort items predictably by learner_name then course_name then module_name
-        items.sort(key=lambda x: (x["learner_name"].lower(), x["course_name"].lower(), x["module_name"].lower()))
+        items.sort(key=lambda x: (x["learner_name"].lower(), (x["course_name"] or "").lower(), x["module_name"].lower()))
 
         data = {
             "total_in_progress_learners": len(distinct_learner_ids),
@@ -3520,12 +4130,25 @@ class AdminOversightViewSet(viewsets.ViewSet):
         for m in memberships:
             group_to_learners[m.group_id].append(m.learner)
 
-        # 4. Pre-fetch training assignments for all relevant groups & candidate types
-        all_cand_types = {g.candidate_type_id for g in all_active_groups if g.candidate_type_id}
+        # 4. Pre-fetch training assignments for all relevant groups & active candidate types
+        all_cand_types = {
+            g.candidate_type_id
+            for g in all_active_groups
+            if g.candidate_type_id and g.candidate_type and g.candidate_type.is_active
+        }
         training_assignments = (
             TrainingAssignment.objects.filter(is_active=True)
             .filter(Q(learner_group__in=all_active_groups) | Q(candidate_type_id__in=all_cand_types))
-            .select_related("course", "learner_group")
+            .select_related(
+                "course",
+                "level",
+                "level__course",
+                "module",
+                "module__course",
+                "module__level",
+                "module__level__course",
+                "learner_group",
+            )
         )
         group_training_assignments = defaultdict(list)
         cand_type_training_assignments = defaultdict(list)
@@ -3535,25 +4158,31 @@ class AdminOversightViewSet(viewsets.ViewSet):
             elif ta.candidate_type_id:
                 cand_type_training_assignments[ta.candidate_type_id].append(ta)
 
-        # 5. Pre-fetch all published modules and map to course
+        # 5. Pre-fetch all eligible published modules and index by course, level, and id
         published_modules = (
-            Module.objects.filter(
-                status=PublicationStatus.PUBLISHED,
-                course__status=PublicationStatus.PUBLISHED,
-            )
-            .select_related("course")
+            Module.objects.filter(status=PublicationStatus.PUBLISHED)
+            .filter(Q(course__isnull=True) | Q(course__status=PublicationStatus.PUBLISHED))
+            .filter(Q(level__course__isnull=True) | Q(level__course__status=PublicationStatus.PUBLISHED))
+            .select_related("course", "level", "level__course")
+            .order_by("level__order", "order", "id")
         )
         course_to_modules = defaultdict(list)
+        level_to_modules = defaultdict(list)
+        modules_by_id = {}
         for mod in published_modules:
-            course_to_modules[mod.course_id].append(mod)
+            eff_course_id = mod.course_id or (mod.level.course_id if mod.level else None)
+            if eff_course_id:
+                course_to_modules[eff_course_id].append(mod)
+            if mod.level_id:
+                level_to_modules[mod.level_id].append(mod)
+            modules_by_id[mod.id] = mod
 
-        # 6. Pre-fetch all active required questions & responses for learner progress
+        # 6. Pre-fetch all active required questions, responses, & assessment attempts for learner progress
         req_questions = ModuleQuestion.objects.filter(is_active=True, is_required=True).values("id", "module_id")
         module_req_q_map = defaultdict(set)
         for rq in req_questions:
             module_req_q_map[rq["module_id"]].add(rq["id"])
 
-        # Fetch all learner responses
         all_learners = {l for l_list in group_to_learners.values() for l in l_list}
         learner_responses = (
             ModuleQuestionResponse.objects.filter(
@@ -3567,38 +4196,93 @@ class AdminOversightViewSet(viewsets.ViewSet):
         for lid, qid in learner_responses:
             learner_answered_map[lid].add(qid)
 
+        learner_attempts = (
+            ModuleAssessmentAttempt.objects.filter(
+                learner__in=all_learners,
+                score__isnull=False,
+            )
+            .values_list("learner_id", "module_id", "score")
+        )
+        learner_best_score_map = defaultdict(dict)
+        for lid, mid, sc in learner_attempts:
+            prev_best = learner_best_score_map[lid].get(mid)
+            if prev_best is None or sc > prev_best:
+                learner_best_score_map[lid][mid] = sc
+
         # Helper to compute group curriculum & progress
         def get_group_curriculum_and_progress(grp):
             learners = group_to_learners.get(grp.id, [])
             grp_tas = list(group_training_assignments.get(grp.id, []))
-            if grp.candidate_type_id:
+            if grp.candidate_type_id and grp.candidate_type and grp.candidate_type.is_active:
                 grp_tas.extend(cand_type_training_assignments.get(grp.candidate_type_id, []))
 
-            # Deduplicate targets
+            # Deduplicate targets across Course, Level, and Module assignments
             direct_crs_ids = set()
+            direct_level_ids = set()
+            direct_mod_ids = set()
             for ta in grp_tas:
                 if ta.course_id:
                     direct_crs_ids.add(ta.course_id)
+                elif ta.level_id:
+                    direct_level_ids.add(ta.level_id)
+                elif ta.module_id:
+                    direct_mod_ids.add(ta.module_id)
 
-            # Resolve all modules for this group
+            # Resolve all eligible published modules for this group (deduplicated by module.id)
             grp_modules_dict = {}
             curriculum_items = []
 
-            for cid in direct_crs_ids:
+            for cid in sorted(direct_crs_ids):
                 mods = course_to_modules.get(cid, [])
                 for m in mods:
                     grp_modules_dict[m.id] = m
                 if mods:
-                    c = mods[0].course
+                    c = mods[0].course or (mods[0].level.course if mods[0].level else None)
+                    if c:
+                        curriculum_items.append({
+                            "type": "Course",
+                            "id": c.id,
+                            "name": c.name,
+                            "code": c.code,
+                            "modules_count": len(mods),
+                        })
+
+            for lid in sorted(direct_level_ids):
+                mods = level_to_modules.get(lid, [])
+                for m in mods:
+                    grp_modules_dict[m.id] = m
+                if mods:
+                    lvl = mods[0].level
+                    eff_c = lvl.course or mods[0].course
                     curriculum_items.append({
-                        "type": "Course",
-                        "id": c.id,
-                        "name": c.name,
-                        "code": c.code,
+                        "type": "CourseLevel",
+                        "id": lvl.id,
+                        "name": lvl.name,
+                        "order": lvl.order,
+                        "level_id": lvl.id,
+                        "level_name": lvl.name,
+                        "course_id": eff_c.id if eff_c else None,
+                        "course_name": eff_c.name if eff_c else None,
                         "modules_count": len(mods),
                     })
 
-            # Calculate learner progress across group modules
+            for mid in sorted(direct_mod_ids):
+                m = modules_by_id.get(mid)
+                if m:
+                    grp_modules_dict[m.id] = m
+                    eff_c = m.course or (m.level.course if m.level else None)
+                    curriculum_items.append({
+                        "type": "Module",
+                        "id": m.id,
+                        "name": m.name,
+                        "level_id": m.level_id,
+                        "level_name": m.level.name if m.level else None,
+                        "course_id": eff_c.id if eff_c else None,
+                        "course_name": eff_c.name if eff_c else None,
+                        "modules_count": 1,
+                    })
+
+            # Calculate learner progress across group modules (respecting 3/5 assessment pass threshold)
             grp_modules = list(grp_modules_dict.values())
             total_mods_count = len(grp_modules)
             completed_learners = 0
@@ -3608,10 +4292,18 @@ class AdminOversightViewSet(viewsets.ViewSet):
                 if total_mods_count == 0:
                     continue
                 lnr_completed_mods = 0
+                ans_qs = learner_answered_map.get(lnr.id, set())
+                best_scores = learner_best_score_map.get(lnr.id, {})
                 for m in grp_modules:
                     req_qs = module_req_q_map.get(m.id, set())
-                    ans_qs = learner_answered_map.get(lnr.id, set())
-                    if len(req_qs) > 0 and len(req_qs.intersection(ans_qs)) == len(req_qs):
+                    total_req = len(req_qs)
+                    answered_req = len(req_qs.intersection(ans_qs))
+                    if total_req >= 5:
+                        best_sc = best_scores.get(m.id)
+                        is_mod_completed = (best_sc is not None and best_sc >= 3.0)
+                    else:
+                        is_mod_completed = (total_req > 0 and answered_req == total_req)
+                    if is_mod_completed:
                         lnr_completed_mods += 1
                 lnr_pct = (lnr_completed_mods / total_mods_count) * 100.0
                 learner_pct_sum += lnr_pct
@@ -3620,8 +4312,12 @@ class AdminOversightViewSet(viewsets.ViewSet):
 
             avg_pct = round(learner_pct_sum / len(learners), 1) if learners else 0.0
 
-            # Count unique courses in curriculum
-            unique_courses = {m.course_id for m in grp_modules}
+            # Count unique courses in curriculum (excluding None for course-less curriculum)
+            unique_courses = {
+                m.course_id or (m.level.course_id if m.level else None)
+                for m in grp_modules
+                if (m.course_id or (m.level.course_id if m.level else None)) is not None
+            }
 
             return {
                 "modules": grp_modules,
@@ -3663,7 +4359,9 @@ class AdminOversightViewSet(viewsets.ViewSet):
                 g_metrics = group_metrics_cache.get(grp.id, {})
                 for m in g_metrics.get("modules", []):
                     trn_all_modules[m.id] = m
-                    trn_all_courses.add(m.course_id)
+                    eff_cid = m.course_id or (m.level.course_id if m.level else None)
+                    if eff_cid is not None:
+                        trn_all_courses.add(eff_cid)
 
                 group_pct_sum += g_metrics.get("average_completion_percentage", 0.0)
 
@@ -4431,25 +5129,72 @@ class ReportsViewSet(viewsets.ViewSet):
     - GET /api/reports/learner-performance/
       Section B: Learner assessment performance scores and submission history.
     - GET /api/reports/course-progress/
-      Section C: Course-wise completion breakdown and average progress rates.
+      Section C: Course-wise and independent-Level completion breakdown and average progress rates.
 
     Role Permissions:
-    - ADMIN: Full visibility across all learners and courses. Supports searching and filtering.
-    - TRAINER: Strictly scoped to assigned learners and assigned courses.
+    - ADMIN: Full visibility across all learners and published curriculum. Supports searching and filtering.
+    - TRAINER: Strictly scoped to assigned learners and assigned curriculum across active trainer cohorts.
     - LEARNER: Strictly scoped to the authenticated learner's own assignments and scores.
     """
     permission_classes = [IsAuthenticated]
 
-    def _get_accessible_learners_and_courses(self, user):
+    def _get_published_modules_for_assignments(self, assignments):
         """
-        Determines the role-scoped learners and courses accessible by *user*:
-        Returns (learners_qs, accessible_course_ids)
+        Resolves distinct published Modules granted by *assignments* (Course, Level, or Module).
+        Includes direct Course modules, hybrid modules (module.course=None, module.level.course=Course),
+        exact Level modules (without sibling Levels), and direct Module targets.
+        Excludes any draft modules or modules belonging to draft courses.
+        """
+        _, assigned_level_ids, assigned_crs_ids, assigned_mod_ids, _ = _get_curriculum_targets(assignments)
+        return (
+            Module.objects.filter(status=PublicationStatus.PUBLISHED)
+            .filter(Q(course__isnull=True) | Q(course__status=PublicationStatus.PUBLISHED))
+            .filter(Q(level__course__isnull=True) | Q(level__course__status=PublicationStatus.PUBLISHED))
+            .filter(
+                Q(course_id__in=assigned_crs_ids)
+                | Q(level__course_id__in=assigned_crs_ids)
+                | Q(level_id__in=assigned_level_ids)
+                | Q(id__in=assigned_mod_ids)
+            )
+            .select_related("course", "level", "level__course")
+            .distinct()
+        )
+
+    def _get_scoped_learner_modules(self, learner, accessible_module_ids=None):
+        """
+        Returns a distinct, deterministically ordered queryset of published Modules
+        personally assigned to *learner* and within *accessible_module_ids* (when supplied).
+        Combines _get_distinct_assigned_modules_for_learner with hybrid Course-level module support.
+        """
+        learner_ta = _get_active_learner_assignments(learner)
+        base_qs = (
+            _get_distinct_assigned_modules_for_learner(learner)
+            | self._get_published_modules_for_assignments(learner_ta)
+        ).select_related("course", "level", "level__course").distinct()
+        if accessible_module_ids is not None:
+            base_qs = base_qs.filter(id__in=accessible_module_ids)
+        return base_qs.order_by("level__order", "order", "id")
+
+    def _get_accessible_learners_and_curriculum(self, user):
+        """
+        Determines the role-scoped learners, accessible published Modules, and effective Course IDs
+        accessible by *user*:
+        Returns (learners_qs, accessible_modules_qs, accessible_course_ids)
         """
         role = _get_role(user)
         if role == User.Role.ADMIN:
             learners_qs = User.objects.filter(role=User.Role.LEARNER)
-            course_ids = set(Course.objects.filter(status=PublicationStatus.PUBLISHED).values_list("id", flat=True))
-            return learners_qs, course_ids
+            accessible_modules_qs = (
+                Module.objects.filter(status=PublicationStatus.PUBLISHED)
+                .filter(Q(course__isnull=True) | Q(course__status=PublicationStatus.PUBLISHED))
+                .filter(Q(level__course__isnull=True) | Q(level__course__status=PublicationStatus.PUBLISHED))
+                .select_related("course", "level", "level__course")
+                .distinct()
+            )
+            course_ids = set(
+                Course.objects.filter(status=PublicationStatus.PUBLISHED).values_list("id", flat=True)
+            )
+            return learners_qs, accessible_modules_qs, course_ids
 
         if role == User.Role.TRAINER:
             trainer_groups = LearnerGroup.objects.filter(
@@ -4463,39 +5208,65 @@ class ReportsViewSet(viewsets.ViewSet):
                 group_memberships__is_active=True,
             ).distinct()
 
-            # Courses assigned to these trainer groups
-            assignments = TrainingAssignment.objects.filter(
-                is_active=True,
-                learner_group__in=trainer_groups,
+            assignments = _get_active_trainer_assignments(user)
+            accessible_modules_qs = self._get_published_modules_for_assignments(assignments)
+            _, _, _, _, raw_course_ids = _get_curriculum_targets(assignments)
+            published_course_ids = set(
+                Course.objects.filter(
+                    id__in=raw_course_ids, status=PublicationStatus.PUBLISHED
+                ).values_list("id", flat=True)
             )
-            _, _, _, _, course_ids = _get_curriculum_targets(assignments)
-            return learners_qs, set(course_ids)
+            for m in accessible_modules_qs:
+                eff_cid = m.course_id or (m.level.course_id if m.level else None)
+                if eff_cid is not None:
+                    published_course_ids.add(eff_cid)
+            return learners_qs, accessible_modules_qs, published_course_ids
 
         if role == User.Role.LEARNER:
             learners_qs = User.objects.filter(id=user.id)
             assignments = _get_active_learner_assignments(user)
-            _, _, _, _, course_ids = _get_curriculum_targets(assignments)
-            return learners_qs, set(course_ids)
+            accessible_modules_qs = self._get_scoped_learner_modules(user)
+            _, _, _, _, raw_course_ids = _get_curriculum_targets(assignments)
+            published_course_ids = set(
+                Course.objects.filter(
+                    id__in=raw_course_ids, status=PublicationStatus.PUBLISHED
+                ).values_list("id", flat=True)
+            )
+            for m in accessible_modules_qs:
+                eff_cid = m.course_id or (m.level.course_id if m.level else None)
+                if eff_cid is not None:
+                    published_course_ids.add(eff_cid)
+            return learners_qs, accessible_modules_qs, published_course_ids
 
-        return User.objects.none(), set()
+        return User.objects.none(), Module.objects.none(), set()
 
-    def _get_course_completion_status_for_learner(self, learner, course):
+    def _get_accessible_learners_and_courses(self, user):
         """
-        Computes the completion status and percentage for a given learner in a course:
+        Backward-compatible wrapper returning (learners_qs, accessible_course_ids).
+        """
+        learners_qs, _, accessible_course_ids = self._get_accessible_learners_and_curriculum(user)
+        return learners_qs, accessible_course_ids
+
+    def _get_modules_completion_status_for_learner(self, learner, modules):
+        """
+        Computes completion status and percentage for *learner* across an explicitly scoped,
+        deduplicated collection of published *modules*.
+        Preserves established completion rules:
+        - 5+ required questions: requires best ModuleAssessmentAttempt.score >= 3.0
+        - <5 required questions: requires total_req > 0 and answered_req == total_req
         Returns:
             status_label: 'COMPLETED' | 'IN_PROGRESS' | 'NOT_STARTED'
             percentage: float (0.0 to 100.0)
             total_modules: int
             completed_modules: int
         """
-        modules = course.modules.filter(status=PublicationStatus.PUBLISHED).order_by("order")
-        total_modules = modules.count()
+        unique_modules = list({m.id: m for m in modules}.values())
+        total_modules = len(unique_modules)
         if total_modules == 0:
             return "NOT_STARTED", 0.0, 0, 0
 
-        module_ids = [m.id for m in modules]
+        module_ids = [m.id for m in unique_modules]
 
-        # Active required questions for this course's modules
         req_questions = ModuleQuestion.objects.filter(
             module_id__in=module_ids,
             is_active=True,
@@ -4506,22 +5277,40 @@ class ReportsViewSet(viewsets.ViewSet):
         for q in req_questions:
             module_req_map[q["module_id"]].add(q["id"])
 
-        # Learner responses to these questions
         all_req_q_ids = [q["id"] for q in req_questions]
-        answered_q_ids = set(ModuleQuestionResponse.objects.filter(
-            question_id__in=all_req_q_ids,
+        answered_q_ids = set(
+            ModuleQuestionResponse.objects.filter(
+                question_id__in=all_req_q_ids,
+                learner=learner,
+            ).values_list("question_id", flat=True)
+        )
+
+        attempts = ModuleAssessmentAttempt.objects.filter(
+            module_id__in=module_ids,
             learner=learner,
-        ).values_list("question_id", flat=True))
+        ).values("module_id", "score")
+        module_best_score_map = {}
+        for att in attempts:
+            mid = att["module_id"]
+            sc = att["score"]
+            if sc is not None:
+                if mid not in module_best_score_map or sc > module_best_score_map[mid]:
+                    module_best_score_map[mid] = sc
 
         completed_modules = 0
-        has_started_any = len(answered_q_ids) > 0
+        has_started_any = len(answered_q_ids) > 0 or len(attempts) > 0
 
-        for m in modules:
+        for m in unique_modules:
             req_set = module_req_map.get(m.id, set())
             total_req = len(req_set)
             answered_req = len(req_set.intersection(answered_q_ids))
-            if total_req > 0 and answered_req == total_req:
-                completed_modules += 1
+            if total_req >= 5:
+                best_sc = module_best_score_map.get(m.id)
+                if best_sc is not None and best_sc >= 3.0:
+                    completed_modules += 1
+            else:
+                if total_req > 0 and answered_req == total_req:
+                    completed_modules += 1
 
         percentage = round((completed_modules / total_modules) * 100.0, 1)
 
@@ -4534,20 +5323,96 @@ class ReportsViewSet(viewsets.ViewSet):
 
         return status_label, percentage, total_modules, completed_modules
 
+    def _get_course_completion_status_for_learner(self, learner, course, scoped_modules=None):
+        """
+        Computes the completion status and percentage for a given learner in a course.
+        When *scoped_modules* is supplied, evaluates strictly those modules.
+        Otherwise resolves the learner's assigned published modules belonging to *course*
+        (including hybrid level.course modules, excluding unassigned sibling levels).
+        """
+        if scoped_modules is not None:
+            return self._get_modules_completion_status_for_learner(learner, scoped_modules)
+
+        learner_course_mods = list(
+            self._get_scoped_learner_modules(learner).filter(
+                Q(course=course) | Q(level__course=course)
+            )
+        )
+        if not learner_course_mods:
+            learner_course_mods = list(
+                Module.objects.filter(status=PublicationStatus.PUBLISHED)
+                .filter(Q(course=course) | Q(level__course=course))
+                .select_related("course", "level", "level__course")
+                .order_by("level__order", "order", "id")
+            )
+        return self._get_modules_completion_status_for_learner(learner, learner_course_mods)
+
+    def _group_learner_modules_into_enrollments(self, learner_mods):
+        """
+        Groups a learner's scoped published modules into logical curriculum enrollments:
+        1. Course-backed enrollments (grouped by effective Course: m.course or m.level.course).
+        2. Independent-Level enrollments (where effective Course is None, grouped by m.level).
+        Returns a list of dicts:
+            {
+                "course": Course | None,
+                "level": CourseLevel | None,   # set if all modules in this enrollment share one Level
+                "modules": [Module, ...],
+            }
+        """
+        course_groups = {}
+        course_objs = {}
+        ind_level_groups = {}
+        ind_level_objs = {}
+
+        for m in learner_mods:
+            eff_course = m.course or (m.level.course if m.level else None)
+            if eff_course is not None:
+                course_objs[eff_course.id] = eff_course
+                course_groups.setdefault(eff_course.id, []).append(m)
+            elif m.level is not None:
+                ind_level_objs[m.level_id] = m.level
+                ind_level_groups.setdefault(m.level_id, []).append(m)
+
+        enrollments = []
+        for cid in sorted(course_groups.keys()):
+            mods = course_groups[cid]
+            distinct_levels = {m.level_id: m.level for m in mods if m.level is not None}
+            single_level = next(iter(distinct_levels.values())) if len(distinct_levels) == 1 else None
+            enrollments.append({
+                "course": course_objs[cid],
+                "level": single_level,
+                "modules": mods,
+            })
+
+        for lid in sorted(
+            ind_level_groups.keys(),
+            key=lambda k: (ind_level_objs[k].order if ind_level_objs[k].order is not None else 0, k),
+        ):
+            mods = ind_level_groups[lid]
+            enrollments.append({
+                "course": None,
+                "level": ind_level_objs[lid],
+                "modules": mods,
+            })
+
+        return enrollments
+
     @action(detail=False, methods=["get"], url_path="overview")
     def overview(self, request):
         """
         Section A: Overview Metrics dashboard.
         """
         user = request.user
-        role = _get_role(user)
-
-        learners_qs, accessible_course_ids = self._get_accessible_learners_and_courses(user)
+        learners_qs, accessible_modules_qs, accessible_course_ids = (
+            self._get_accessible_learners_and_curriculum(user)
+        )
         total_learners = learners_qs.count()
 
-        # Courses
+        # Backward-compatible Course count: accessible published Courses (not independent Levels)
         courses_qs = Course.objects.filter(id__in=accessible_course_ids, status=PublicationStatus.PUBLISHED)
         total_courses = courses_qs.count()
+
+        accessible_module_ids = set(accessible_modules_qs.values_list("id", flat=True))
 
         # Enrollments & status counts
         total_enrollments = 0
@@ -4556,16 +5421,20 @@ class ReportsViewSet(viewsets.ViewSet):
         not_started_enrollments = 0
         total_pct_sum = 0.0
 
-        for learner in learners_qs:
-            # Active courses for this learner
-            learner_ta = _get_active_learner_assignments(learner)
-            _, _, _, _, learner_accessible_course_ids = _get_curriculum_targets(learner_ta)
-            learner_course_ids = accessible_course_ids.intersection(learner_accessible_course_ids)
-            learner_courses = Course.objects.filter(id__in=learner_course_ids, status=PublicationStatus.PUBLISHED)
+        learners_progress = []
 
-            for course in learner_courses:
+        for learner in learners_qs:
+            learner_mods = list(self._get_scoped_learner_modules(learner, accessible_module_ids))
+            enrollments = self._group_learner_modules_into_enrollments(learner_mods)
+
+            for enr in enrollments:
+                all_mods = enr["modules"]
+                total_req_modules = len(all_mods)
+                if total_req_modules == 0:
+                    continue
+
                 total_enrollments += 1
-                c_status, pct, _, _ = self._get_course_completion_status_for_learner(learner, course)
+                c_status, pct, _, _ = self._get_modules_completion_status_for_learner(learner, all_mods)
                 total_pct_sum += pct
                 if c_status == "COMPLETED":
                     completed_enrollments += 1
@@ -4573,6 +5442,116 @@ class ReportsViewSet(viewsets.ViewSet):
                     in_progress_enrollments += 1
                 else:
                     not_started_enrollments += 1
+
+                comp_count = 0
+                in_prog_count = 0
+                not_start_count = 0
+                modules_prog_list = []
+                ar_list = []
+
+                for m in all_mods:
+                    req_q = ModuleQuestion.objects.filter(module=m, is_active=True, is_required=True)
+                    tot_q = req_q.count()
+                    is_tested = (tot_q >= 5)
+                    answered_q = ModuleQuestionResponse.objects.filter(question__in=req_q, learner=learner).count()
+
+                    att = ModuleAssessmentAttempt.objects.filter(module=m, learner=learner).order_by("-score").first()
+                    best_score = att.score if att else None
+
+                    m_level_id = m.level_id
+                    m_level_name = m.level.name if m.level else None
+
+                    if is_tested:
+                        has_passed = (best_score is not None and best_score >= 3.0)
+                        if best_score is not None and has_passed:
+                            res = "PASS"
+                            mod_status = "COMPLETED"
+                            comp_count += 1
+                        elif best_score is not None:
+                            res = "FAIL"
+                            mod_status = "IN PROGRESS"
+                            in_prog_count += 1
+                        elif answered_q > 0:
+                            res = "IN PROGRESS"
+                            mod_status = "IN PROGRESS"
+                            in_prog_count += 1
+                        else:
+                            res = "NOT STARTED"
+                            mod_status = "NOT STARTED"
+                            not_start_count += 1
+
+                        score_disp = f"{int(best_score)}/5" if best_score is not None else "—"
+
+                        ar_list.append({
+                            "module_id": m.id,
+                            "module_name": m.name,
+                            "level_id": m_level_id,
+                            "level_name": m_level_name,
+                            "score_display": score_disp,
+                            "result": res,
+                            "completion_status": "Completed" if has_passed else "Not Completed",
+                            "is_completed": has_passed,
+                        })
+                    else:
+                        if tot_q > 0 and answered_q == tot_q:
+                            mod_status = "COMPLETED"
+                            comp_count += 1
+                        elif answered_q > 0:
+                            mod_status = "IN PROGRESS"
+                            in_prog_count += 1
+                        else:
+                            mod_status = "NOT STARTED"
+                            not_start_count += 1
+                        res = "—"
+                        score_disp = "—"
+
+                    modules_prog_list.append({
+                        "module_id": m.id,
+                        "module_name": m.name,
+                        "level_id": m_level_id,
+                        "level_name": m_level_name,
+                        "is_tested_module": is_tested,
+                        "total_required_questions": tot_q,
+                        "answered_required_questions": answered_q,
+                        "score_display": score_disp,
+                        "result": res,
+                        "status": mod_status,
+                    })
+
+                progress_pct = round((comp_count / total_req_modules) * 100.0, 1)
+                if comp_count == total_req_modules:
+                    enr_status = "COMPLETED"
+                elif comp_count > 0 or in_prog_count > 0:
+                    enr_status = "IN_PROGRESS"
+                else:
+                    enr_status = "NOT_STARTED"
+
+                course_obj = enr["course"]
+                level_obj = enr["level"]
+                enr_level_id = level_obj.id if level_obj else None
+                enr_level_name = level_obj.name if level_obj else None
+                enr_course_id = course_obj.id if course_obj else None
+                enr_course_name = course_obj.name if course_obj else enr_level_name
+
+                learner_name = learner.get_full_name().strip() or learner.username
+                learners_progress.append({
+                    "learner_id": learner.id,
+                    "learner_name": learner_name,
+                    "learner_username": learner.username,
+                    "learner_email": learner.email or "",
+                    "course_id": enr_course_id,
+                    "course_name": enr_course_name,
+                    "level_id": enr_level_id,
+                    "level_name": enr_level_name,
+                    "enrollment_status": enr_status,
+                    "overall_progress_percentage": progress_pct,
+                    "total_required_modules": total_req_modules,
+                    "completed_modules": comp_count,
+                    "in_progress_modules": in_prog_count,
+                    "not_started_modules": not_start_count,
+                    "assessment_results": ar_list,
+                    "modules_progress": modules_prog_list,
+                })
 
         overall_completion_pct = (
             round(total_pct_sum / total_enrollments, 1)
@@ -4588,6 +5567,7 @@ class ReportsViewSet(viewsets.ViewSet):
             "in_progress_courses": in_progress_enrollments,
             "not_started_courses": not_started_enrollments,
             "overall_completion_percentage": overall_completion_pct,
+            "learners_progress": learners_progress,
         }
         serializer = ReportOverviewSerializer(data=data)
         serializer.is_valid(raise_exception=True)
@@ -4601,13 +5581,12 @@ class ReportsViewSet(viewsets.ViewSet):
         - Displays actual recorded scores only.
         - If scored assessment functionality is not supported/recorded for content,
           records is_scored=False with null scores and clear indicator.
-        - Applies role-based scoping (Admin: all, Trainer: assigned learners, Learner: self).
-        - Supports ?search= (name/email/username), ?course= (id), and ?learner= (id).
+        - Applies role-based scoping (Admin: all, Trainer: assigned learners, Learner: self)
+          AND restricts each learner's responses to modules personally assigned to that learner.
+        - Supports ?search= (name/email/username), ?course= (id), ?level= (id), and ?learner= (id).
         """
         user = request.user
-        role = _get_role(user)
-
-        learners_qs, accessible_course_ids = self._get_accessible_learners_and_courses(user)
+        learners_qs, accessible_modules_qs, _ = self._get_accessible_learners_and_curriculum(user)
 
         # Filters
         search_query = request.query_params.get("search", "").strip()
@@ -4627,26 +5606,50 @@ class ReportsViewSet(viewsets.ViewSet):
         if course_id_filter:
             try:
                 cid = int(course_id_filter)
-                accessible_course_ids = accessible_course_ids.intersection({cid})
+                accessible_modules_qs = accessible_modules_qs.filter(
+                    Q(course_id=cid) | Q(level__course_id=cid)
+                )
             except ValueError:
-                pass
+                accessible_modules_qs = Module.objects.none()
+
+        level_id_filter = request.query_params.get("level")
+        if level_id_filter:
+            try:
+                lid = int(level_id_filter)
+                accessible_modules_qs = accessible_modules_qs.filter(level_id=lid)
+            except ValueError:
+                accessible_modules_qs = Module.objects.none()
 
         # Specific learner inspection endpoint
         inspect_learner_id = request.query_params.get("inspect_learner")
 
-        # Query responses for accessible learners
+        accessible_module_ids = set(accessible_modules_qs.values_list("id", flat=True))
+        learner_allowed_mod_ids = {}
+        for lnr in learners_qs:
+            learner_allowed_mod_ids[lnr.id] = set(
+                self._get_scoped_learner_modules(lnr, accessible_module_ids).values_list("id", flat=True)
+            )
+
+        # Query responses for accessible learners & accessible modules
         responses = ModuleQuestionResponse.objects.filter(
             learner__in=learners_qs,
-            question__module__course_id__in=accessible_course_ids,
+            question__module_id__in=accessible_module_ids,
         ).select_related(
             "learner",
+            "attempt",
             "question",
             "question__module",
             "question__module__course",
+            "question__module__level",
+            "question__module__level__course",
         ).order_by("-submitted_at")
 
         results = []
         for r in responses:
+            # Strictly enforce that the response's module is personally assigned to r.learner
+            if r.question.module_id not in learner_allowed_mod_ids.get(r.learner_id, set()):
+                continue
+
             # Check for scored assessment fields in response_payload
             payload = r.response_payload if isinstance(r.response_payload, dict) else {}
             has_score = (
@@ -4672,15 +5675,19 @@ class ReportsViewSet(viewsets.ViewSet):
                     percentage = None
 
             learner_full_name = r.learner.get_full_name().strip() or r.learner.username
+            mod = r.question.module
+            eff_course = mod.course or (mod.level.course if mod.level else None)
 
             results.append({
                 "learner_id": r.learner.id,
                 "learner_name": learner_full_name,
                 "email": r.learner.email or "",
-                "course_id": r.question.module.course.id,
-                "course_name": r.question.module.course.name,
-                "module_id": r.question.module.id,
-                "module_name": r.question.module.name,
+                "course_id": eff_course.id if eff_course else None,
+                "course_name": eff_course.name if eff_course else None,
+                "level_id": mod.level_id,
+                "level_name": mod.level.name if mod.level else None,
+                "module_id": mod.id,
+                "module_name": mod.name,
                 "assessment_name": r.question.question_text[:100],
                 "attempt_number": r.attempt.attempt_number if r.attempt else 1,
                 "marks_obtained": marks_obtained,
@@ -4690,23 +5697,29 @@ class ReportsViewSet(viewsets.ViewSet):
                 "is_scored": has_score and (marks_obtained is not None),
             })
 
-        # If inspect_learner parameter is provided, also compile their course-by-course breakdown
+        # If inspect_learner parameter is provided, compile their scoped Course & independent-Level breakdown
         learner_profile_data = None
         if inspect_learner_id:
             try:
                 inspected_learner = learners_qs.get(id=inspect_learner_id)
-                # Compute course-wise breakdown
-                learner_ta = _get_active_learner_assignments(inspected_learner)
-                _, _, _, _, l_course_ids = _get_curriculum_targets(learner_ta)
-                valid_cids = accessible_course_ids.intersection(l_course_ids)
-                inspected_courses = Course.objects.filter(id__in=valid_cids, status=PublicationStatus.PUBLISHED)
+                inspected_mods = list(
+                    self._get_scoped_learner_modules(inspected_learner, accessible_module_ids)
+                )
+                enrollments = self._group_learner_modules_into_enrollments(inspected_mods)
 
                 course_summaries = []
-                for c in inspected_courses:
-                    c_status, pct, tot_m, comp_m = self._get_course_completion_status_for_learner(inspected_learner, c)
+                for enr in enrollments:
+                    mods = enr["modules"]
+                    c_obj = enr["course"]
+                    l_obj = enr["level"]
+                    c_status, pct, tot_m, comp_m = self._get_modules_completion_status_for_learner(
+                        inspected_learner, mods
+                    )
                     course_summaries.append({
-                        "course_id": c.id,
-                        "course_name": c.name,
+                        "course_id": c_obj.id if c_obj else None,
+                        "course_name": c_obj.name if c_obj else (l_obj.name if l_obj else None),
+                        "level_id": l_obj.id if l_obj else None,
+                        "level_name": l_obj.name if l_obj else None,
                         "status": c_status,
                         "completion_percentage": pct,
                         "total_modules": tot_m,
@@ -4733,53 +5746,95 @@ class ReportsViewSet(viewsets.ViewSet):
     def course_progress(self, request):
         """
         Section C: Course Progress Report.
-        Course-wise progress metrics across assigned learners.
-        Supports ?search= (course name) and ?course= (id).
+        Course-wise and independent-Level progress metrics across assigned learners.
+        Supports ?search= (course/level name), ?course= (id), and ?level= (id).
         """
         user = request.user
-        role = _get_role(user)
-
-        learners_qs, accessible_course_ids = self._get_accessible_learners_and_courses(user)
-
-        courses_qs = Course.objects.filter(id__in=accessible_course_ids, status=PublicationStatus.PUBLISHED).order_by("name")
+        learners_qs, accessible_modules_qs, accessible_course_ids = (
+            self._get_accessible_learners_and_curriculum(user)
+        )
 
         search_query = request.query_params.get("search", "").strip()
+        course_id_filter = request.query_params.get("course")
+        level_id_filter = request.query_params.get("level")
+
+        courses_qs = Course.objects.filter(
+            id__in=accessible_course_ids, status=PublicationStatus.PUBLISHED
+        ).order_by("name")
+
         if search_query:
             courses_qs = courses_qs.filter(name__icontains=search_query)
 
-        course_id_filter = request.query_params.get("course")
         if course_id_filter:
             try:
-                courses_qs = courses_qs.filter(id=int(course_id_filter))
+                cid = int(course_id_filter)
+                courses_qs = courses_qs.filter(id=cid)
+                accessible_modules_qs = accessible_modules_qs.filter(
+                    Q(course_id=cid) | Q(level__course_id=cid)
+                )
             except ValueError:
-                pass
+                courses_qs = Course.objects.none()
+                accessible_modules_qs = Module.objects.none()
 
-        # Build enrollment map per course: course_id -> list of assigned learners
-        # To avoid N*M queries, fetch all active assignments for accessible learners
-        learner_to_course_ids = defaultdict(set)
-        for learner in learners_qs:
-            l_ta = _get_active_learner_assignments(learner)
-            _, _, _, _, cids = _get_curriculum_targets(l_ta)
-            learner_to_course_ids[learner.id] = set(cids)
+        if level_id_filter:
+            try:
+                lid = int(level_id_filter)
+                accessible_modules_qs = accessible_modules_qs.filter(level_id=lid)
+                level_course_ids = {
+                    m.course_id or (m.level.course_id if m.level else None)
+                    for m in accessible_modules_qs
+                    if (m.course_id or (m.level.course_id if m.level else None)) is not None
+                }
+                courses_qs = courses_qs.filter(id__in=level_course_ids)
+            except ValueError:
+                courses_qs = Course.objects.none()
+                accessible_modules_qs = Module.objects.none()
 
-        course_to_learners = defaultdict(list)
+        accessible_module_ids = set(accessible_modules_qs.values_list("id", flat=True))
+
+        # Map each course_id -> {learner_id: (learner, [scoped_modules])}
+        # and each independent level_id -> {learner_id: (learner, [scoped_modules])}
+        course_learner_mods = defaultdict(dict)
+        ind_level_learner_mods = defaultdict(dict)
+        ind_levels_by_id = {}
+
+        # Also track accessible independent levels that have published modules in scope
+        for m in accessible_modules_qs:
+            eff_course = m.course or (m.level.course if m.level else None)
+            if eff_course is None and m.level is not None:
+                ind_levels_by_id[m.level_id] = m.level
+
         for learner in learners_qs:
-            for cid in learner_to_course_ids[learner.id]:
-                if cid in accessible_course_ids:
-                    course_to_learners[cid].append(learner)
+            l_mods = list(self._get_scoped_learner_modules(learner, accessible_module_ids))
+            for enr in self._group_learner_modules_into_enrollments(l_mods):
+                c_obj = enr["course"]
+                l_obj = enr["level"]
+                mods = enr["modules"]
+                if c_obj is not None:
+                    course_learner_mods[c_obj.id][learner.id] = (learner, mods, l_obj)
+                elif l_obj is not None:
+                    ind_levels_by_id[l_obj.id] = l_obj
+                    ind_level_learner_mods[l_obj.id][learner.id] = (learner, mods)
 
         items = []
         for course in courses_qs:
-            assigned_learners = course_to_learners.get(course.id, [])
-            assigned_count = len(assigned_learners)
+            learner_entries = list(course_learner_mods.get(course.id, {}).values())
+            assigned_count = len(learner_entries)
 
             completed_count = 0
             in_progress_count = 0
             not_started_count = 0
             pct_sum = 0.0
+            single_levels = set()
 
-            for learner in assigned_learners:
-                c_status, pct, _, _ = self._get_course_completion_status_for_learner(learner, course)
+            for learner, scoped_mods, l_obj in learner_entries:
+                if l_obj is not None:
+                    single_levels.add((l_obj.id, l_obj.name))
+                else:
+                    single_levels.add((None, None))
+                c_status, pct, _, _ = self._get_course_completion_status_for_learner(
+                    learner, course, scoped_modules=scoped_mods
+                )
                 pct_sum += pct
                 if c_status == "COMPLETED":
                     completed_count += 1
@@ -4789,16 +5844,68 @@ class ReportsViewSet(viewsets.ViewSet):
                     not_started_count += 1
 
             avg_pct = round(pct_sum / assigned_count, 1) if assigned_count > 0 else 0.0
+            if len(single_levels) == 1:
+                c_lvl_id, c_lvl_name = next(iter(single_levels))
+            else:
+                c_lvl_id, c_lvl_name = None, None
 
             items.append({
                 "course_id": course.id,
                 "course_name": course.name,
+                "level_id": c_lvl_id,
+                "level_name": c_lvl_name,
                 "assigned_learners_count": assigned_count,
                 "completed_learners_count": completed_count,
                 "in_progress_learners_count": in_progress_count,
                 "not_started_learners_count": not_started_count,
                 "average_completion_percentage": avg_pct,
             })
+
+        # Include independent-Level progress entries when not filtering for a specific Course ID
+        if not course_id_filter:
+            sorted_ind_levels = sorted(
+                ind_levels_by_id.values(),
+                key=lambda lvl: (lvl.order if lvl.order is not None else 0, lvl.name.lower(), lvl.id),
+            )
+            for lvl in sorted_ind_levels:
+                if search_query and search_query.lower() not in lvl.name.lower():
+                    continue
+                learner_entries = list(ind_level_learner_mods.get(lvl.id, {}).values())
+                assigned_count = len(learner_entries)
+                # For Admin, only include independent Levels that have assigned learners or when explicitly filtered by level
+                if assigned_count == 0 and _get_role(user) == User.Role.ADMIN and not level_id_filter:
+                    continue
+
+                completed_count = 0
+                in_progress_count = 0
+                not_started_count = 0
+                pct_sum = 0.0
+
+                for learner, scoped_mods in learner_entries:
+                    l_status, pct, _, _ = self._get_modules_completion_status_for_learner(
+                        learner, scoped_mods
+                    )
+                    pct_sum += pct
+                    if l_status == "COMPLETED":
+                        completed_count += 1
+                    elif l_status == "IN_PROGRESS":
+                        in_progress_count += 1
+                    else:
+                        not_started_count += 1
+
+                avg_pct = round(pct_sum / assigned_count, 1) if assigned_count > 0 else 0.0
+
+                items.append({
+                    "course_id": None,
+                    "course_name": lvl.name,
+                    "level_id": lvl.id,
+                    "level_name": lvl.name,
+                    "assigned_learners_count": assigned_count,
+                    "completed_learners_count": completed_count,
+                    "in_progress_learners_count": in_progress_count,
+                    "not_started_learners_count": not_started_count,
+                    "average_completion_percentage": avg_pct,
+                })
 
         serializer = ReportCourseProgressItemSerializer(items, many=True)
         return Response(serializer.data)
@@ -4937,6 +6044,7 @@ class TrainingFileViewSet(viewsets.ModelViewSet):
             "failed": failed_files,
         }, status=status.HTTP_201_CREATED if created_files else status.HTTP_200_OK)
 
+    @xframe_options_sameorigin
     @action(detail=True, methods=["get"], url_path="download")
     def download_file(self, request, pk=None):
         """
@@ -4999,6 +6107,7 @@ class TrainingFileViewSet(viewsets.ModelViewSet):
                 response["Content-Length"] = preview_file_size
                 response["Cache-Control"] = "private, no-cache, no-store, must-revalidate"
                 response["X-Content-Type-Options"] = "nosniff"
+                response["X-Frame-Options"] = "SAMEORIGIN"
                 return response
             except Exception as e:
                 logger.error("DOCX preview generation error for admin training file %s: %s", training_file.id, e)
@@ -5029,6 +6138,7 @@ class TrainingFileViewSet(viewsets.ModelViewSet):
         response["Content-Length"] = training_file.file_size
         response["Cache-Control"] = "private, no-cache, no-store, must-revalidate"
         response["X-Content-Type-Options"] = "nosniff"
+        response["X-Frame-Options"] = "SAMEORIGIN"
         return response
 
     def destroy(self, request, *args, **kwargs):

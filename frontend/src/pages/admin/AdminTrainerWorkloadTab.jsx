@@ -82,11 +82,6 @@ export default function AdminTrainerWorkloadTab() {
         </button>
       </div>
 
-      {/* Scope and Data Accuracy Callout */}
-      <div className="alert alert-info" style={{ marginBottom: "20px", fontSize: "13px", lineHeight: "1.5" }}>
-        <strong>Data Scope Notice:</strong> This dashboard measures <em>Curriculum & Cohort Assignments</em> and <em>Learner Comprehension Progress</em> derived from active cohort enrollments and module confirmation gates. Actual scheduled classroom sessions and individual session attendance are not yet tracked by the system.
-      </div>
-
       {error && (
         <div className="alert alert-error" role="status" style={{ marginBottom: "16px" }}>
           <span>{error}</span>

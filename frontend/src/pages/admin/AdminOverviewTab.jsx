@@ -202,12 +202,12 @@ function UserDistributionDonut({ admins = 0, trainers = 0, learners = 0 }) {
 }
 
 /**
- * Visual horizontal multi-segment bar chart showing course status breakdown (Published vs Draft).
+ * Visual horizontal multi-segment bar chart showing module status breakdown (Published vs Draft).
  */
-function CourseStatusChart({ published = 0, draft = 0 }) {
-  const total = published + draft;
-  const publishedPct = total > 0 ? (published / total) * 100 : 0;
-  const draftPct = total > 0 ? (draft / total) * 100 : 0;
+function ModuleStatusChart({ published = 0, draft = 0, total = 0 }) {
+  const effectiveTotal = total > 0 ? total : published + draft;
+  const publishedPct = effectiveTotal > 0 ? (published / effectiveTotal) * 100 : 0;
+  const draftPct = effectiveTotal > 0 ? (draft / effectiveTotal) * 100 : 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
@@ -223,7 +223,7 @@ function CourseStatusChart({ published = 0, draft = 0 }) {
           border: "1px solid var(--border-color)",
         }}
       >
-        {total === 0 ? (
+        {effectiveTotal === 0 ? (
           <div style={{ width: "100%", background: "transparent" }} />
         ) : (
           <>
@@ -266,7 +266,7 @@ function CourseStatusChart({ published = 0, draft = 0 }) {
           <span style={{ color: "var(--text-secondary)" }}>Published:</span>
           <strong style={{ color: "var(--text-main)" }}>{published}</strong>
           <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>
-            ({total > 0 ? publishedPct.toFixed(0) : 0}%)
+            ({effectiveTotal > 0 ? publishedPct.toFixed(0) : 0}%)
           </span>
         </div>
 
@@ -283,12 +283,12 @@ function CourseStatusChart({ published = 0, draft = 0 }) {
           <span style={{ color: "var(--text-secondary)" }}>Draft:</span>
           <strong style={{ color: "var(--text-main)" }}>{draft}</strong>
           <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>
-            ({total > 0 ? draftPct.toFixed(0) : 0}%)
+            ({effectiveTotal > 0 ? draftPct.toFixed(0) : 0}%)
           </span>
         </div>
 
         <div style={{ fontSize: "12px", color: "var(--text-muted)" }}>
-          Total Courses: <strong style={{ color: "var(--text-main)" }}>{total}</strong>
+          Total Modules: <strong style={{ color: "var(--text-main)" }}>{effectiveTotal}</strong>
         </div>
       </div>
     </div>
@@ -298,6 +298,7 @@ function CourseStatusChart({ published = 0, draft = 0 }) {
 export default function AdminOverviewTab() {
   const [metrics, setMetrics] = useState(null);
   const [activities, setActivities] = useState([]);
+  const [moduleList, setModuleList] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -313,12 +314,15 @@ export default function AdminOverviewTab() {
 
   const loadData = useCallback(async () => {
     try {
-      const [overviewData, activityData] = await Promise.all([
+      const [overviewData, activityData, modulesData] = await Promise.all([
         apiClient("/admin/reports/overview/"),
         apiClient("/admin/reports/activity/"),
+        apiClient("/modules/").catch(() => []),
       ]);
       setMetrics(overviewData);
       setActivities(activityData?.recent_activities || []);
+      const mods = Array.isArray(modulesData) ? modulesData : (modulesData?.results || []);
+      setModuleList(mods);
       setError(null);
     } catch (err) {
       setError(err.message || "Failed to load administrative overview.");
@@ -331,13 +335,16 @@ export default function AdminOverviewTab() {
     let isMounted = true;
     async function init() {
       try {
-        const [overviewData, activityData] = await Promise.all([
+        const [overviewData, activityData, modulesData] = await Promise.all([
           apiClient("/admin/reports/overview/"),
           apiClient("/admin/reports/activity/"),
+          apiClient("/modules/").catch(() => []),
         ]);
         if (isMounted) {
           setMetrics(overviewData);
           setActivities(activityData?.recent_activities || []);
+          const mods = Array.isArray(modulesData) ? modulesData : (modulesData?.results || []);
+          setModuleList(mods);
           setError(null);
           setLoading(false);
         }
@@ -452,7 +459,16 @@ export default function AdminOverviewTab() {
   const totalCourses = metrics?.total_courses ?? 0;
   const draftCourses = metrics?.draft_courses ?? 0;
   const publishedCourses = metrics?.published_courses ?? 0;
-  const totalModules = metrics?.total_modules ?? 0;
+  const totalModules = metrics?.total_modules ?? moduleList.length;
+
+  // Actual module status counts calculated from moduleList
+  const publishedModulesCount = moduleList.length > 0
+    ? moduleList.filter((m) => m.status === "PUBLISHED").length
+    : totalModules;
+  const draftModulesCount = moduleList.length > 0
+    ? moduleList.filter((m) => m.status === "DRAFT").length
+    : 0;
+  const effectiveTotalModules = moduleList.length > 0 ? moduleList.length : totalModules;
   const activeLearnersCount = metrics?.active_learners_count ?? 0;
   const completionRate = metrics?.system_wide_completion_rate ?? 0;
   const recentLogins = metrics?.recent_logins || [];
@@ -519,63 +535,6 @@ export default function AdminOverviewTab() {
           </div>
         </div>
 
-        {/* Row 2, Card 2: Learners In Progress */}
-        <div
-          ref={inProgressCardRef}
-          className="stat-card"
-          role="button"
-          tabIndex={0}
-          onClick={handleOpenInProgressModal}
-          onKeyDown={handleKeyDownCard}
-          title="Click to view details of learners with unfinished modules"
-          style={{
-            cursor: "pointer",
-            transition: "transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease",
-            outline: "none",
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.borderColor = "var(--accent-primary)";
-            e.currentTarget.style.transform = "translateY(-2px)";
-            e.currentTarget.style.boxShadow = "var(--shadow-md)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.borderColor = "var(--border-color)";
-            e.currentTarget.style.transform = "none";
-            e.currentTarget.style.boxShadow = "none";
-          }}
-          onFocus={(e) => {
-            e.currentTarget.style.borderColor = "var(--accent-primary)";
-            e.currentTarget.style.boxShadow = "0 0 0 2px var(--accent-primary)";
-          }}
-          onBlur={(e) => {
-            e.currentTarget.style.borderColor = "var(--border-color)";
-            e.currentTarget.style.boxShadow = "none";
-          }}
-        >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-            <div className="stat-header">Learners In Progress</div>
-            <span
-              style={{
-                fontSize: "11px",
-                fontWeight: "600",
-                color: "var(--accent-primary)",
-                backgroundColor: "rgba(99, 102, 241, 0.12)",
-                padding: "2px 8px",
-                borderRadius: "12px",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "4px",
-              }}
-            >
-              View Details &rarr;
-            </span>
-          </div>
-          <div className="stat-value" style={{ color: inProgressLearnersCount > 0 ? "var(--accent-secondary)" : "var(--text-main)" }}>
-            {inProgressLearnersCount}
-          </div>
-          <div className="stat-footer">Started modules without completion</div>
-        </div>
-
         {/* Row 2, Card 3: Learner Completion Rate */}
         <div className="stat-card">
           <div className="stat-header">Learner Completion Rate</div>
@@ -587,10 +546,10 @@ export default function AdminOverviewTab() {
           </div>
         </div>
 
-        {/* Row 2, Card 4: Total Courses */}
+        {/* Row 2, Card 4: Total Modules */}
         <div className="stat-card">
-          <div className="stat-header">Total Courses</div>
-          <div className="stat-value">{totalCourses}</div>
+          <div className="stat-header">Total Modules</div>
+          <div className="stat-value">{totalModules}</div>
           <div className="stat-footer">
             {publishedCourses} Published &bull; {draftCourses} Draft &bull; {totalModules} Modules
           </div>
@@ -608,15 +567,15 @@ export default function AdminOverviewTab() {
           <UserDistributionDonut admins={totalAdmins} trainers={totalTrainers} learners={totalLearners} />
         </div>
 
-        {/* Course Status Breakdown Chart */}
+        {/* Module Status Breakdown Chart */}
         <div className="card">
           <h3 className="card-title" style={{ marginBottom: "16px", fontSize: "15px" }}>
-            <span>Course Status Breakdown</span>
-            <span className="badge badge-info">{totalCourses} Courses</span>
+            <span>Module Status Breakdown</span>
+            <span className="badge badge-info">{effectiveTotalModules} Modules</span>
           </h3>
-          <CourseStatusChart published={publishedCourses} draft={draftCourses} />
+          <ModuleStatusChart published={publishedModulesCount} draft={draftModulesCount} total={effectiveTotalModules} />
           <p style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "16px", lineHeight: "1.4" }}>
-            Standalone courses operate directly without mandatory programs. Courses must be published for learner cohort assignments.
+            Modules are learning units within courses. Published modules are available according to the LMS's existing course access and assignment rules.
           </p>
         </div>
       </div>

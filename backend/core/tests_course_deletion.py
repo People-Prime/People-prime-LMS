@@ -114,7 +114,7 @@ class AdminCourseDeletionTests(APITestCase):
             status=PublicationStatus.PUBLISHED,
             created_by=self.admin,
         )
-        mod = Module.objects.create(course=course, name="React Hooks", code="RH-1", order=1)
+        mod = Module.objects.create(course=course, name="React Hooks", order=1)
         sub = Submodule.objects.create(module=mod, name="useEffect Deep Dive", order=1)
         assign = TrainingAssignment.objects.create(course=course, learner_group=self.group)
         q = ModuleQuestion.objects.create(module=mod, question_text="What is a hook?", is_required=True)
@@ -173,7 +173,7 @@ class AdminCourseDeletionTests(APITestCase):
             status=PublicationStatus.PUBLISHED,
             created_by=self.admin,
         )
-        mod = Module.objects.create(course=course, name="Mod 1", code="M1", order=1)
+        mod = Module.objects.create(course=course, name="Mod 1", order=1)
         assign = TrainingAssignment.objects.create(course=course, learner=self.learner)
         q = ModuleQuestion.objects.create(module=mod, question_text="Quiz Q1", is_required=True)
         attempt = ModuleAssessmentAttempt.objects.create(module=mod, learner=self.learner, attempt_number=1)
@@ -220,7 +220,7 @@ class AdminCourseDeletionTests(APITestCase):
             status=PublicationStatus.PUBLISHED,
             created_by=self.admin,
         )
-        mod = Module.objects.create(course=course, name="Mod RB", code="MRB", order=1)
+        mod = Module.objects.create(course=course, name="Mod RB", order=1)
 
         self.client.force_authenticate(user=self.admin)
 

@@ -72,9 +72,9 @@ class CourseAutoPublishingTests(TestCase):
             status=PublicationStatus.DRAFT,
             created_by=self.admin,
         )
-        mod_draft = Module.objects.create(course=course, name="Mod 1", code="M1", order=1, status=PublicationStatus.DRAFT)
-        mod_published = Module.objects.create(course=course, name="Mod 2", code="M2", order=2, status=PublicationStatus.PUBLISHED)
-        mod_archived = Module.objects.create(course=course, name="Mod 3", code="M3", order=3, status=PublicationStatus.ARCHIVED)
+        mod_draft = Module.objects.create(course=course, name="Mod 1", order=1, status=PublicationStatus.DRAFT)
+        mod_published = Module.objects.create(course=course, name="Mod 2", order=2, status=PublicationStatus.PUBLISHED)
+        mod_archived = Module.objects.create(course=course, name="Mod 3", order=3, status=PublicationStatus.ARCHIVED)
 
         sub_draft_1 = Submodule.objects.create(module=mod_draft, name="Lesson 1.1", order=1, status=PublicationStatus.DRAFT)
         sub_pub_1 = Submodule.objects.create(module=mod_draft, name="Lesson 1.2", order=2, status=PublicationStatus.PUBLISHED)
@@ -138,9 +138,9 @@ class CourseAutoPublishingTests(TestCase):
             status=PublicationStatus.PUBLISHED,
             created_by=self.admin,
         )
-        mod1 = Module.objects.create(course=course, name="Mod 1", code="M1", order=1, status=PublicationStatus.PUBLISHED)
-        mod2 = Module.objects.create(course=course, name="Mod 2", code="M2", order=2, status=PublicationStatus.DRAFT)
-        mod_arch = Module.objects.create(course=course, name="Mod 3", code="M3", order=3, status=PublicationStatus.ARCHIVED)
+        mod1 = Module.objects.create(course=course, name="Mod 1", order=1, status=PublicationStatus.PUBLISHED)
+        mod2 = Module.objects.create(course=course, name="Mod 2", order=2, status=PublicationStatus.DRAFT)
+        mod_arch = Module.objects.create(course=course, name="Mod 3", order=3, status=PublicationStatus.ARCHIVED)
 
         sub1_draft = Submodule.objects.create(module=mod1, name="Lesson 1.1", order=1, status=PublicationStatus.DRAFT)
         sub2_draft = Submodule.objects.create(module=mod2, name="Lesson 2.1", order=1, status=PublicationStatus.DRAFT)
@@ -216,7 +216,7 @@ class CourseAutoPublishingTests(TestCase):
             status=PublicationStatus.DRAFT,
             created_by=self.admin,
         )
-        mod = Module.objects.create(course=course, name="Mod 1", code="M1", order=1, status=PublicationStatus.DRAFT)
+        mod = Module.objects.create(course=course, name="Mod 1", order=1, status=PublicationStatus.DRAFT)
         sub = Submodule.objects.create(module=mod, name="Sub 1", order=1, status=PublicationStatus.DRAFT)
 
         self.client.force_authenticate(user=self.admin)
@@ -243,7 +243,7 @@ class CourseAutoPublishingTests(TestCase):
             status=PublicationStatus.DRAFT,
             created_by=self.admin,
         )
-        mod1 = Module.objects.create(course=course, name="Module 1", code="M1", order=1, status=PublicationStatus.DRAFT)
+        mod1 = Module.objects.create(course=course, name="Module 1", order=1, status=PublicationStatus.DRAFT)
         sub1 = Submodule.objects.create(module=mod1, name="Lesson 1", order=1, status=PublicationStatus.DRAFT)
 
         # Assign course to assigned_learner

@@ -1,6 +1,7 @@
 import { useState, useRef, useMemo } from "react";
 import { apiClient, getTrainingFileDownloadUrl } from "../../../services/api";
 import ActionMenu from "../../../components/common/ActionMenu";
+import SecurePdfViewer from "../../../components/common/SecurePdfViewer";
 
 export default function MaterialRepositoryView({
   selectedCourse,
@@ -100,14 +101,11 @@ export default function MaterialRepositoryView({
     const isDirectPreviewable = ["PDF", "DOCX", "DOC", "PNG", "JPG", "JPEG", "WEBP", "GIF"].includes(fileType);
 
     if (isDirectPreviewable) {
-      const previewUrl = ["PDF", "DOCX", "DOC"].includes(fileType)
-        ? `${downloadUrl}#toolbar=0&navpanes=0&scrollbar=1`
-        : downloadUrl;
       setPreviewingFile({
         id: file.id,
         filename: file.filename,
         fileType,
-        url: previewUrl,
+        url: downloadUrl,
       });
     } else {
       setPreviewingFile({
@@ -510,7 +508,7 @@ export default function MaterialRepositoryView({
                   <th>Relative Path</th>
                   <th>Size</th>
                   <th>Mappings</th>
-                  <th style={{ width: "210px", minWidth: "210px", textAlign: "right" }}>Actions</th>
+                  <th style={{ width: "240px", minWidth: "240px", textAlign: "right" }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -562,7 +560,7 @@ export default function MaterialRepositoryView({
                           {mCount} {mCount === 1 ? "Mapping" : "Mappings"}
                         </span>
                       </td>
-                      <td style={{ width: "210px", minWidth: "210px", textAlign: "right" }}>
+                      <td style={{ width: "240px", minWidth: "240px", textAlign: "right" }}>
                         <div style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "flex-end", flexWrap: "nowrap", flexShrink: 0 }}>
                           <button
                             type="button"
@@ -596,6 +594,17 @@ export default function MaterialRepositoryView({
                                 title: ["PDF", "PNG", "JPG", "JPEG", "WEBP", "GIF"].includes((f.file_type || "").toUpperCase())
                                   ? "Preview file directly"
                                   : "Preview unavailable for this format",
+                              },
+                              {
+                                label: "Attach & Preview",
+                                icon: (
+                                  <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                  </svg>
+                                ),
+                                onClick: () => onOpenAttachModal({ file: f, initialShowPreview: true }),
+                                title: "Attach with side-by-side material preview",
                               },
                               {
                                 label: "Attach to Lesson",
@@ -660,8 +669,8 @@ export default function MaterialRepositoryView({
             style={{
               backgroundColor: "var(--bg-card, #ffffff)",
               borderRadius: "8px",
-              width: "100%",
-              maxWidth: "920px",
+              width: "88vw",
+              maxWidth: "1200px",
               height: "85vh",
               display: "flex",
               flexDirection: "column",
@@ -700,7 +709,7 @@ export default function MaterialRepositoryView({
                   <button
                     type="button"
                     className="btn btn-secondary"
-                    onClick={() => window.open(previewingFile.url, "_blank")}
+                    onClick={() => window.open(`/viewer?fileId=${previewingFile.id}&title=${encodeURIComponent(previewingFile.filename)}`, "_blank")}
                     style={{ padding: "4px 10px", fontSize: "12px" }}
                   >
                     Open in New Tab
@@ -720,16 +729,17 @@ export default function MaterialRepositoryView({
             <div
               style={{
                 flex: 1,
+                minHeight: 0,
                 backgroundColor: "var(--bg-primary, #f1f5f9)",
                 overflow: "hidden",
                 display: "flex",
-                justifyContent: "center",
-                alignItems: "center",
-                padding: "20px",
+                flexDirection: "column",
+                position: "relative",
+                padding: "0",
               }}
             >
               {previewingFile.unsupported ? (
-                <div style={{ textAlign: "center", maxWidth: "420px" }}>
+                <div style={{ textAlign: "center", maxWidth: "420px", padding: "20px" }}>
                   <div style={{ fontSize: "36px", marginBottom: "12px" }}>📄</div>
                   <h4 style={{ fontSize: "16px", fontWeight: "600", color: "var(--text-main)", marginBottom: "8px" }}>
                     Preview Unavailable for this Format
@@ -743,15 +753,10 @@ export default function MaterialRepositoryView({
                   src={previewingFile.url}
                   alt={previewingFile.filename}
                   style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
+                  onContextMenu={(e) => e.preventDefault()}
                 />
               ) : (
-                <iframe
-                  src={previewingFile.url}
-                  title={previewingFile.filename}
-                  className="lms-document-viewer-container"
-                  onContextMenu={(e) => e.preventDefault()}
-                  style={{ width: "100%", height: "100%", border: "none" }}
-                />
+                <SecurePdfViewer url={previewingFile.url} title={previewingFile.filename} />
               )}
             </div>
           </div>
