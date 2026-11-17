@@ -83,6 +83,14 @@ WSGI_APPLICATION = "config.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
+db_options = {}
+db_sslmode = os.getenv("DB_SSLMODE", "")
+if db_sslmode:
+    db_options["sslmode"] = db_sslmode
+elif not DEBUG:
+    # Recommended default for AWS RDS PostgreSQL in production
+    db_options["sslmode"] = "require"
+
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
@@ -91,8 +99,11 @@ DATABASES = {
         "PASSWORD": os.getenv("DB_PASSWORD"),
         "HOST": os.getenv("DB_HOST", "localhost"),
         "PORT": os.getenv("DB_PORT", "5432"),
+        "CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "300")),
+        "OPTIONS": db_options,
     }
 }
+
 
 
 # Password validation
@@ -124,11 +135,29 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 # Media files (Learning materials, documents, videos, images)
-# Local development storage; extensible to cloud storage (S3) for production
-MEDIA_URL = "/media/"
-MEDIA_ROOT = BASE_DIR / "media"
+# Local development storage; extensible to AWS S3 for production
+USE_S3_STORAGE = os.getenv("USE_S3_STORAGE", "False").lower() in ("true", "1", "yes")
+
+if USE_S3_STORAGE:
+    # Amazon S3 Private Bucket Storage Configuration via django-storages
+    INSTALLED_APPS.append("storages")
+    DEFAULT_FILE_STORAGE = "storages.backends.s3boto3.S3Boto3Storage"
+    AWS_STORAGE_BUCKET_NAME = os.getenv("AWS_STORAGE_BUCKET_NAME")
+    AWS_S3_REGION_NAME = os.getenv("AWS_S3_REGION_NAME", "ap-south-1")
+    # Enforce private file access; Block Public Access stays enabled
+    AWS_DEFAULT_ACL = None
+    AWS_QUERYSTRING_AUTH = True
+    AWS_S3_FILE_OVERWRITE = False
+    MEDIA_URL = f"https://{AWS_STORAGE_BUCKET_NAME}.s3.{AWS_S3_REGION_NAME}.amazonaws.com/"
+    # For generated previews cache on EC2 local storage
+    MEDIA_ROOT = BASE_DIR / "media"
+else:
+    MEDIA_URL = "/media/"
+    MEDIA_ROOT = BASE_DIR / "media"
+
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "100"))
 
 # Default primary key field type
@@ -149,24 +178,87 @@ REST_FRAMEWORK = {
 }
 
 # Cross-Origin Resource Sharing (CORS)
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
+cors_allowed_raw = os.getenv("CORS_ALLOWED_ORIGINS", "")
+if cors_allowed_raw:
+    CORS_ALLOWED_ORIGINS = [o.strip() for o in cors_allowed_raw.split(",") if o.strip()]
+elif DEBUG:
+    CORS_ALLOWED_ORIGINS = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+else:
+    CORS_ALLOWED_ORIGINS = []
 
 CORS_ALLOW_CREDENTIALS = True
 
 # CSRF Trusted Origins
-CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
+csrf_trusted_raw = os.getenv("CSRF_TRUSTED_ORIGINS", "")
+if csrf_trusted_raw:
+    CSRF_TRUSTED_ORIGINS = [o.strip() for o in csrf_trusted_raw.split(",") if o.strip()]
+elif DEBUG:
+    CSRF_TRUSTED_ORIGINS = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+else:
+    CSRF_TRUSTED_ORIGINS = []
 
 # Session and Cookie Security
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
 CSRF_COOKIE_SAMESITE = "Lax"
 
-# In production (when DEBUG is False), enforce HTTPS transmission of cookies
+# In production (when DEBUG is False), enforce HTTPS transmission of cookies and reverse proxy headers
 SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
+
+if not DEBUG:
+    # Tell Django that Nginx/CloudFront terminates HTTPS
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    # Redirect HTTP to HTTPS only if explicitly enabled via environment variable
+    # (avoiding redirect loops if SSL termination happens at CloudFront/Nginx level)
+    if os.getenv("SECURE_SSL_REDIRECT", "False").lower() in ("true", "1", "yes"):
+        SECURE_SSL_REDIRECT = True
+    # HSTS configuration: only active when HTTPS is fully validated
+    if os.getenv("SECURE_HSTS_SECONDS"):
+        SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS"))
+        SECURE_HSTS_INCLUDE_SUBDOMAINS = os.getenv("SECURE_HSTS_INCLUDE_SUBDOMAINS", "False").lower() in ("true", "1", "yes")
+        SECURE_HSTS_PRELOAD = os.getenv("SECURE_HSTS_PRELOAD", "False").lower() in ("true", "1", "yes")
+
+# Structured Production Logging
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "[{asctime}] {levelname} [{name}:{lineno}] {message}",
+            "style": "{",
+        },
+        "simple": {
+            "format": "{levelname} {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": os.getenv("LOG_LEVEL", "INFO"),
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console"],
+            "level": os.getenv("DJANGO_LOG_LEVEL", "INFO"),
+            "propagate": False,
+        },
+        "core": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}

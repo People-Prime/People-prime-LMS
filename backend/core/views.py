@@ -27,6 +27,25 @@ def lms_status(request):
     })
 
 
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def health_check(request):
+    """
+    Lightweight, unauthenticated health-check probe for AWS ALB, Route 53, and uptime monitors.
+    Validates database connectivity without exposing connection strings, stack traces,
+    or internal infrastructure details.
+    """
+    from django.db import connection
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1;")
+            cursor.fetchone()
+        return Response({"status": "healthy"}, status=200)
+    except Exception:
+        # Intentionally generic to avoid exposing internal infrastructure error details
+        return Response({"status": "unhealthy"}, status=503)
+
+
 @require_GET
 def csrf_token(request):
     """

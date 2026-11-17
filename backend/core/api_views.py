@@ -618,14 +618,15 @@ def _cleanup_unreferenced_training_files(training_file_ids):
             if not has_other_mappings:
                 try:
                     tf = TrainingFile.objects.get(pk=tf_id)
-                    file_path = tf.file.path if tf.file else None
+                    file_storage_name = tf.file.name if tf.file else None
                     tf.delete()
-                    if file_path and os.path.exists(file_path):
+                    if file_storage_name and tf.file and tf.file.storage:
                         try:
-                            os.remove(file_path)
-                            logger.info("Permanently removed unreferenced training file from storage: %s", file_path)
-                        except OSError as os_err:
-                            logger.warning("Could not delete unreferenced file from disk at '%s': %s", file_path, str(os_err))
+                            if tf.file.storage.exists(file_storage_name):
+                                tf.file.storage.delete(file_storage_name)
+                                logger.info("Permanently removed unreferenced training file from storage: %s", file_storage_name)
+                        except Exception as storage_err:
+                            logger.warning("Could not delete unreferenced file from storage at '%s': %s", file_storage_name, str(storage_err))
                 except TrainingFile.DoesNotExist:
                     pass
         except Exception as e:
@@ -1353,8 +1354,14 @@ class ModuleViewSet(viewsets.ModelViewSet):
             if "18. Assessment - Recruitment Process_ Multiple Choice" in tf.filename:
                 from rest_framework.exceptions import PermissionDenied
                 raise PermissionDenied("Access to assessment answer keys is restricted.")
-        if not tf.file or not os.path.exists(tf.file.path):
+        # Verify file existence via storage or disk
+        if not tf.file:
             raise Http404("The physical file was not found on server storage.")
+        try:
+            if not tf.file.storage.exists(tf.file.name):
+                raise Http404("The physical file was not found on server storage.")
+        except Exception:
+            pass
 
         content_type, _ = mimetypes.guess_type(tf.filename)
         content_type = (content_type or "application/octet-stream").lower()
@@ -1424,7 +1431,7 @@ class ModuleViewSet(viewsets.ModelViewSet):
             )
 
         response = FileResponse(
-            open(tf.file.path, "rb"),
+            tf.file.open("rb"),
             content_type=content_type,
         )
         response["Content-Disposition"] = f'inline; filename="{tf.filename}"'
@@ -1702,8 +1709,14 @@ class SubmoduleViewSet(viewsets.ModelViewSet):
             if "18. Assessment - Recruitment Process_ Multiple Choice" in tf.filename:
                 from rest_framework.exceptions import PermissionDenied
                 raise PermissionDenied("Access to assessment answer keys is restricted.")
-        if not tf.file or not os.path.exists(tf.file.path):
+        # Verify file existence via storage or disk
+        if not tf.file:
             raise Http404("The physical file was not found on server storage.")
+        try:
+            if not tf.file.storage.exists(tf.file.name):
+                raise Http404("The physical file was not found on server storage.")
+        except Exception:
+            pass
 
         content_type, _ = mimetypes.guess_type(tf.filename)
         content_type = (content_type or "application/octet-stream").lower()
@@ -1774,7 +1787,7 @@ class SubmoduleViewSet(viewsets.ModelViewSet):
             )
 
         response = FileResponse(
-            open(tf.file.path, "rb"),
+            tf.file.open("rb"),
             content_type=content_type,
         )
         response["Content-Disposition"] = f'inline; filename="{tf.filename}"'
@@ -1980,8 +1993,14 @@ class SubmoduleViewSet(viewsets.ModelViewSet):
             if "18. Assessment - Recruitment Process_ Multiple Choice" in tf.filename:
                 from rest_framework.exceptions import PermissionDenied
                 raise PermissionDenied("Access to assessment answer keys is restricted.")
-        if not tf.file or not os.path.exists(tf.file.path):
+        # Verify file existence via storage or disk
+        if not tf.file:
             raise Http404("The physical file was not found on server storage.")
+        try:
+            if not tf.file.storage.exists(tf.file.name):
+                raise Http404("The physical file was not found on server storage.")
+        except Exception:
+            pass
 
         content_type, _ = mimetypes.guess_type(tf.filename)
         content_type = (content_type or "application/octet-stream").lower()
@@ -2052,7 +2071,7 @@ class SubmoduleViewSet(viewsets.ModelViewSet):
             )
 
         response = FileResponse(
-            open(tf.file.path, "rb"),
+            tf.file.open("rb"),
             content_type=content_type,
         )
         response["Content-Disposition"] = f'inline; filename="{tf.filename}"'
@@ -6062,8 +6081,13 @@ class TrainingFileViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Direct file downloads are disabled across the LMS. Only inline viewing is permitted.")
 
         training_file = self.get_object()
-        if not training_file.file or not os.path.exists(training_file.file.path):
+        if not training_file.file:
             raise Http404("The requested file was not found on the server storage.")
+        try:
+            if not training_file.file.storage.exists(training_file.file.name):
+                raise Http404("The requested file was not found on the server storage.")
+        except Exception:
+            pass
 
         content_type, _ = mimetypes.guess_type(training_file.filename)
         content_type = (content_type or "application/octet-stream").lower()
@@ -6131,7 +6155,7 @@ class TrainingFileViewSet(viewsets.ModelViewSet):
             )
 
         response = FileResponse(
-            open(training_file.file.path, "rb"),
+            training_file.file.open("rb"),
             content_type=content_type,
         )
         response["Content-Disposition"] = f'inline; filename="{training_file.filename}"'
@@ -6149,7 +6173,7 @@ class TrainingFileViewSet(viewsets.ModelViewSet):
         - Removes physical file from disk storage only after DB transaction succeeds.
         """
         instance = self.get_object()
-        file_path = instance.file.path if instance.file else None
+        file_storage_name = instance.file.name if instance.file else None
 
         # Gather file metadata and mapping details for audit and response
         file_id = instance.id
@@ -6189,15 +6213,16 @@ class TrainingFileViewSet(viewsets.ModelViewSet):
                 instance.delete()
 
             # Physical file cleanup only after atomic DB deletion succeeds
-            if file_path and os.path.exists(file_path):
+            if file_storage_name:
                 try:
-                    os.remove(file_path)
-                except OSError as os_err:
+                    if instance.file.storage.exists(file_storage_name):
+                        instance.file.storage.delete(file_storage_name)
+                except Exception as del_err:
                     logger.warning(
-                        "TrainingFile record %s deleted, but physical file deletion at '%s' failed: %s",
+                        "TrainingFile record %s deleted, but storage file deletion at '%s' failed: %s",
                         file_id,
-                        file_path,
-                        str(os_err),
+                        file_storage_name,
+                        str(del_err),
                     )
 
             return Response(

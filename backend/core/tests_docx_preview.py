@@ -9,6 +9,7 @@ from rest_framework.test import APIClient
 
 from core.models import (
     Course,
+    CourseLevel,
     Module,
     Submodule,
     PublicationStatus,
@@ -86,15 +87,21 @@ class DocxPreviewRoleSecurityTests(TestCase):
             uploaded_by=self.admin,
         )
 
-        # Published Course
+        # Published Course & Level
         self.pub_course = Course.objects.create(
             name="Published Recruitment",
             code="PUB-101",
             status=PublicationStatus.PUBLISHED,
             created_by=self.admin,
         )
+        self.pub_level = CourseLevel.objects.create(
+            name="Level 1",
+            course=self.pub_course,
+            order=1,
+        )
         self.pub_module = Module.objects.create(
             course=self.pub_course,
+            level=self.pub_level,
             name="Published Module",
             status=PublicationStatus.PUBLISHED,
         )
@@ -124,15 +131,21 @@ class DocxPreviewRoleSecurityTests(TestCase):
             is_active=True,
         )
 
-        # Draft Course
+        # Draft Course & Level
         self.draft_course = Course.objects.create(
             name="Draft Recruitment",
             code="DFT-101",
             status=PublicationStatus.DRAFT,
             created_by=self.admin,
         )
+        self.draft_level = CourseLevel.objects.create(
+            name="Level 1",
+            course=self.draft_course,
+            order=1,
+        )
         self.draft_module = Module.objects.create(
             course=self.draft_course,
+            level=self.draft_level,
             name="Draft Module",
             status=PublicationStatus.DRAFT,
         )

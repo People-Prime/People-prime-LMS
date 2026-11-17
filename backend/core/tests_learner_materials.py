@@ -8,6 +8,7 @@ from rest_framework.test import APIClient
 from core.models import (
     CandidateType,
     Course,
+    CourseLevel,
     LearnerGroup,
     Module,
     PublicationStatus,
@@ -64,8 +65,14 @@ class LearnerMaterialsSecurityTests(TestCase):
             status=PublicationStatus.PUBLISHED,
             created_by=self.admin,
         )
+        self.level = CourseLevel.objects.create(
+            name="Level 1",
+            course=self.course,
+            order=1,
+        )
         self.module = Module.objects.create(
             course=self.course,
+            level=self.level,
             name="Module A",
             order=1,
             status=PublicationStatus.PUBLISHED,

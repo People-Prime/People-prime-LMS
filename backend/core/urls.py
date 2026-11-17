@@ -2,6 +2,7 @@ from django.urls import include, path
 
 from .views import (
     csrf_token,
+    health_check,
     lms_status,
     session_login,
     session_logout,
@@ -10,6 +11,8 @@ from .views import (
 )
 
 urlpatterns = [
+    # Health / monitoring probes
+    path("health/", health_check, name="health-check"),
     # Auth / public endpoints (Phase 1 & 2)
     path("status/", lms_status, name="lms-status"),
     path("csrf/", csrf_token, name="csrf-token"),

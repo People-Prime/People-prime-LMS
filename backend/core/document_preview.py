@@ -275,22 +275,37 @@ def generate_docx_pdf_preview(docx_path, output_pdf_path):
 def get_or_create_docx_preview(training_file):
     """
     Retrieves or generates the cached PDF preview for a DOCX TrainingFile.
+    Compatible with both local filesystem storage and remote S3 storage.
     Returns:
         preview_pdf_path (str) if successful.
     Raises:
         ValueError, FileNotFoundError, or Exception if conversion fails.
     """
-    if not training_file.file or not os.path.exists(training_file.file.path):
-        raise FileNotFoundError("The original document file was not found on server storage.")
+    if not training_file.file:
+        raise FileNotFoundError("The document file record has no attached file.")
 
-    docx_path = training_file.file.path
     ensure_previews_dir()
 
-    content_hash = get_file_content_hash(docx_path)
+    # Determine a reliable content hash. If on local disk, use file content hash;
+    # if on remote S3 storage where .path is unsupported, hash the storage name + file_size.
+    try:
+        if hasattr(training_file.file, "path") and os.path.exists(training_file.file.path):
+            docx_source_path = training_file.file.path
+            content_hash = get_file_content_hash(docx_source_path)
+            is_local = True
+        else:
+            docx_source_path = None
+            content_hash = hashlib.sha256(f"{training_file.file.name}_{training_file.file_size}".encode("utf-8")).hexdigest()
+            is_local = False
+    except NotImplementedError:
+        docx_source_path = None
+        content_hash = hashlib.sha256(f"{training_file.file.name}_{training_file.file_size}".encode("utf-8")).hexdigest()
+        is_local = False
+
     preview_filename = f"preview_{training_file.id}_{content_hash[:16]}.pdf"
     preview_path = os.path.join(PREVIEWS_DIR, preview_filename)
 
-    # Cache hit check: if file exists and has non-zero size, reuse it
+    # Cache hit check: if preview file exists and has non-zero size, reuse it
     if os.path.exists(preview_path) and os.path.getsize(preview_path) > 0:
         return preview_path
 
@@ -308,5 +323,25 @@ def get_or_create_docx_preview(training_file):
         logger.debug("Failed cleaning old previews for file %s: %s", training_file.id, e)
 
     # Generate fresh preview
-    generate_docx_pdf_preview(docx_path, preview_path)
+    if is_local and docx_source_path:
+        generate_docx_pdf_preview(docx_source_path, preview_path)
+    else:
+        # Remote storage (e.g. AWS S3): Download to a temporary file, convert, and delete temp file
+        temp_docx = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
+        try:
+            with training_file.file.open("rb") as f_in:
+                while True:
+                    chunk = f_in.read(65536)
+                    if not chunk:
+                        break
+                    temp_docx.write(chunk)
+            temp_docx.close()
+            generate_docx_pdf_preview(temp_docx.name, preview_path)
+        finally:
+            if os.path.exists(temp_docx.name):
+                try:
+                    os.remove(temp_docx.name)
+                except Exception:
+                    pass
+
     return preview_path
