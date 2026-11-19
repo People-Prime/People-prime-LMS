@@ -878,22 +878,10 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
         setSubmitting(true);
         setError(null);
         try {
-          // Direct multipart upload using fetch with session token
-          const token = localStorage.getItem("accessToken") || "";
-          const headers = {};
-          if (token) {
-            headers["Authorization"] = `Bearer ${token}`;
-          }
-          const response = await fetch(`/api/modules/${moduleId}/upload-content/`, {
+          await apiClient(`/modules/${moduleId}/upload-content/`, {
             method: "POST",
-            headers,
             body: formData,
           });
-
-          if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || errorData.detail || `Upload failed with status ${response.status}`);
-          }
 
           setSuccessMessage("Learning material uploaded directly to module successfully.");
           setShowUploadModuleModal(false);
