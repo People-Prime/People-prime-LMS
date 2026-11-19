@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { apiClient } from "../../services/api";
+import { apiClient, getCsrfToken } from "../../services/api";
 
 // Subcomponents under courses/
 import CourseCatalogView from "./courses/CourseCatalogView";
@@ -884,9 +884,13 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
           if (token) {
             headers["Authorization"] = `Bearer ${token}`;
           }
+          const csrfToken = await getCsrfToken();
+          headers["X-CSRFToken"] = csrfToken;
+ 
           const response = await fetch(`/api/modules/${moduleId}/upload-content/`, {
             method: "POST",
             headers,
+            credentials: "include",
             body: formData,
           });
 
