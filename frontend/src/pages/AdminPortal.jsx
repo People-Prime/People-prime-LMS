@@ -8,6 +8,7 @@ import AdminCurriculumTab from "./admin/AdminCurriculumTab";
 import AdminCohortsTab from "./admin/AdminCohortsTab";
 import AdminReportsTab from "./admin/AdminReportsTab";
 import AdminTrainerWorkloadTab from "./admin/AdminTrainerWorkloadTab";
+import AdminProjectsTab from "./admin/AdminProjectsTab";
 
 export default function AdminPortal() {
   const { user } = useAuth();
@@ -27,7 +28,7 @@ export default function AdminPortal() {
     }
 
     // 2. Direct query param tab matching
-    if (tabParam && ["overview", "users", "curriculum", "cohorts", "learners", "trainer-workload"].includes(tabParam)) {
+    if (tabParam && ["overview", "users", "curriculum", "cohorts", "learners", "trainer-workload", "projects"].includes(tabParam)) {
       return { tab: tabParam, view: viewParam || null };
     }
 
@@ -113,6 +114,7 @@ export default function AdminPortal() {
       {activeTab === "cohorts" && <AdminCohortsTab />}
       {activeTab === "learners" && <AdminReportsTab portalRole="ADMIN" />}
       {activeTab === "trainer-workload" && <AdminTrainerWorkloadTab />}
+      {activeTab === "projects" && <AdminProjectsTab />}
     </DashboardLayout>
   );
 }

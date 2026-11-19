@@ -3,11 +3,12 @@ import DashboardLayout from "../components/DashboardLayout";
 import { useAuth } from "../hooks/useAuth";
 import TrainerOverviewTab from "./trainer/TrainerOverviewTab";
 import TrainerCoursesTab from "./trainer/TrainerCoursesTab";
+import TrainerProjectsTab from "./trainer/TrainerProjectsTab";
 import AdminReportsTab from "./admin/AdminReportsTab";
 
 export default function TrainerPortal() {
   const { user, activePortal } = useAuth();
-  const [activeTab, setActiveTab] = useState("overview"); // 'overview' | 'courses' | 'learners'
+  const [activeTab, setActiveTab] = useState("overview"); // 'overview' | 'courses' | 'learners' | 'projects'
 
   const isAdminPreview = user?.role === "ADMIN" && activePortal === "TRAINER";
 
@@ -29,6 +30,8 @@ export default function TrainerPortal() {
             ? "Trainer Oversight Command Center"
             : activeTab === "courses"
             ? "Published Curriculum Catalogue"
+            : activeTab === "projects"
+            ? "Assigned Projects & Submissions Oversight"
             : "Trainer Reports & Completion Analytics"}
         </h1>
         <p className="dashboard-subtitle">
@@ -38,6 +41,8 @@ export default function TrainerPortal() {
             ? `Welcome back, ${user?.username}. You are authenticated as an LMS Trainer with cohort-scoped access.`
             : activeTab === "courses"
             ? "Inspect all Administrator-published courses, modules, submodules, and supplementary learning documents in read-only mode."
+            : activeTab === "projects"
+            ? "Inspect assigned projects, download guidance materials, and evaluate learner submissions."
             : "Review cohort completion records, module evaluations, and learner performance statistics."}
         </p>
       </div>
@@ -52,6 +57,10 @@ export default function TrainerPortal() {
 
       {activeTab === "courses" && (
         <TrainerCoursesTab />
+      )}
+
+      {activeTab === "projects" && (
+        <TrainerProjectsTab />
       )}
 
       {activeTab === "learners" && (

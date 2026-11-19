@@ -23,7 +23,7 @@ from django.views.decorators.clickjacking import xframe_options_sameorigin
 
 from rest_framework import filters, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
@@ -50,6 +50,10 @@ from core.models import (
     TrainingCluster,
     TrainingFile,
     TrainingFileMapping,
+    Project,
+    ProjectResource,
+    ProjectSubmission,
+    ProjectSubmissionFile,
 )
 from core.permissions import IsLMSAdmin
 from core.audit_utils import generate_audit_description
@@ -93,6 +97,10 @@ from core.serializers import (
     TrainingClusterSerializer,
     TrainingFileMappingSerializer,
     TrainingFileSerializer,
+    ProjectSerializer,
+    ProjectResourceSerializer,
+    ProjectSubmissionSerializer,
+    ProjectSubmissionFileSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -6309,6 +6317,530 @@ class TrainingFileMappingViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save()
+
+
+# =============================================================================
+# 12. Project Management & Submission ViewSets
+# =============================================================================
+
+class ProjectViewSet(viewsets.ModelViewSet):
+    """
+    CRUD and assignment endpoints for Project entities.
+    Permissions & scoping:
+      - Admin: full access to all projects (including DRAFT and ARCHIVED).
+      - Trainer: can view projects assigned to them or where they are an assigned trainer.
+      - Learner: can view non-draft projects assigned to them.
+    """
+    serializer_class = ProjectSerializer
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def get_queryset(self):
+        user = self.request.user
+        role = _get_role(user)
+
+        # Base active (non-soft-deleted) projects
+        qs = Project.objects.filter(is_deleted=False).prefetch_related(
+            "trainers", "learners", "resources", "submissions"
+        )
+
+        if role == User.Role.ADMIN:
+            # Admins see all projects
+            return qs
+
+        if role == User.Role.TRAINER:
+            # Trainers see projects assigned to them
+            return qs.filter(trainers=user).distinct()
+
+        if role == User.Role.LEARNER:
+            # Learners see active/completed/archived projects assigned to them (exclude DRAFT)
+            return qs.filter(
+                learners=user
+            ).exclude(
+                status=Project.ProjectStatus.DRAFT
+            ).distinct()
+
+        return Project.objects.none()
+
+    def _require_admin(self):
+        if _get_role(self.request.user) != User.Role.ADMIN:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("LMS Admin role required.")
+
+    def create(self, request, *args, **kwargs):
+        self._require_admin()
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        project = serializer.save(created_by=request.user)
+
+        # Handle trainer and learner assignments if provided in create payload
+        trainer_ids = request.data.get("trainers", [])
+        learner_ids = request.data.get("learners", [])
+        if trainer_ids:
+            project.trainers.set(User.objects.filter(id__in=trainer_ids, role=User.Role.TRAINER))
+        if learner_ids:
+            project.learners.set(User.objects.filter(id__in=learner_ids, role=User.Role.LEARNER))
+
+        _log_audit(
+            request,
+            AuditAction.CREATE,
+            "Project",
+            project.pk,
+            {"title": project.title, "status": project.status, "priority": project.priority},
+        )
+        return Response(ProjectSerializer(project, context={"request": request}).data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        self._require_admin()
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        project = serializer.save()
+
+        if "trainers" in request.data:
+            trainer_ids = request.data.get("trainers", [])
+            project.trainers.set(User.objects.filter(id__in=trainer_ids, role=User.Role.TRAINER))
+
+        if "learners" in request.data:
+            learner_ids = request.data.get("learners", [])
+            project.learners.set(User.objects.filter(id__in=learner_ids, role=User.Role.LEARNER))
+
+        _log_audit(
+            request,
+            AuditAction.UPDATE,
+            "Project",
+            project.pk,
+            {"title": project.title, "status": project.status, "priority": project.priority},
+        )
+        return Response(ProjectSerializer(project, context={"request": request}).data)
+
+    def partial_update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return self.update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        Soft-deletes project to protect learner submission history.
+        """
+        self._require_admin()
+        project = self.get_object()
+        project.is_deleted = True
+        project.status = Project.ProjectStatus.ARCHIVED
+        project.save(update_fields=["is_deleted", "status", "updated_at"])
+
+        _log_audit(
+            request,
+            AuditAction.DELETE,
+            "Project",
+            project.pk,
+            {"title": project.title, "soft_deleted": True},
+        )
+        return Response({"message": f"Project '{project.title}' deleted successfully."}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="assign")
+    def assign_users(self, request, pk=None):
+        """
+        Assign or update assigned trainers and learners for a project.
+        Admin-only.
+        """
+        self._require_admin()
+        project = self.get_object()
+        trainer_ids = request.data.get("trainers")
+        learner_ids = request.data.get("learners")
+
+        details = {}
+        if trainer_ids is not None:
+            trainers = User.objects.filter(id__in=trainer_ids, role=User.Role.TRAINER)
+            project.trainers.set(trainers)
+            details["assigned_trainers_count"] = trainers.count()
+
+        if learner_ids is not None:
+            learners = User.objects.filter(id__in=learner_ids, role=User.Role.LEARNER)
+            project.learners.set(learners)
+            details["assigned_learners_count"] = learners.count()
+
+        _log_audit(
+            request,
+            AuditAction.ASSIGN,
+            "Project",
+            project.pk,
+            details,
+        )
+        return Response(ProjectSerializer(project, context={"request": request}).data)
+
+    @action(detail=True, methods=["post"], url_path="upload-resource")
+    def upload_resource(self, request, pk=None):
+        """
+        Uploads a project resource (document, template, guide).
+        Admin or assigned Trainer only.
+        """
+        project = self.get_object()
+        user = request.user
+        role = _get_role(user)
+
+        if role != User.Role.ADMIN and not project.trainers.filter(id=user.id).exists():
+            return Response({"error": "Permission denied. Admin or assigned Trainer required."}, status=status.HTTP_403_FORBIDDEN)
+
+        file_obj = request.FILES.get("file")
+        if not file_obj:
+            return Response({"error": "No file uploaded."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            validate_learning_material_file(file_obj)
+        except ValidationError as val_err:
+            return Response({"error": str(val_err.message if hasattr(val_err, 'message') else val_err)}, status=status.HTTP_400_BAD_REQUEST)
+
+        resource = ProjectResource.objects.create(
+            project=project,
+            file=file_obj,
+            original_name=file_obj.name,
+            file_size=file_obj.size,
+            uploaded_by=user,
+        )
+
+        _log_audit(
+            request,
+            AuditAction.CREATE,
+            "ProjectResource",
+            resource.pk,
+            {"filename": resource.original_name, "project_id": project.pk},
+        )
+        return Response(ProjectResourceSerializer(resource).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["delete"], url_path=r"resources/(?P<resource_id>\d+)")
+    def delete_resource(self, request, pk=None, resource_id=None):
+        """
+        Deletes a project resource.
+        Admin or assigned Trainer only.
+        """
+        project = self.get_object()
+        user = request.user
+        role = _get_role(user)
+
+        if role != User.Role.ADMIN and not project.trainers.filter(id=user.id).exists():
+            return Response({"error": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+
+        resource = get_object_or_404(ProjectResource, pk=resource_id, project=project)
+        try:
+            if resource.file and resource.file.storage.exists(resource.file.name):
+                resource.file.storage.delete(resource.file.name)
+        except Exception as e:
+            logger.warning("Error deleting physical file for ProjectResource %s: %s", resource.pk, e)
+
+        resource.delete()
+        _log_audit(
+            request,
+            AuditAction.DELETE,
+            "ProjectResource",
+            resource_id,
+            {"project_id": project.pk},
+        )
+        return Response({"message": "Resource deleted successfully."}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get"], url_path=r"resources/(?P<resource_id>\d+)/download")
+    def download_resource(self, request, pk=None, resource_id=None):
+        """
+        Secure authorized download of project resources.
+        Available to Admin, assigned Trainers, and assigned Learners.
+        """
+        project = get_object_or_404(Project, pk=pk)
+        user = request.user
+        role = _get_role(user)
+
+        # Scoping check
+        if role == User.Role.ADMIN:
+            pass
+        elif role == User.Role.TRAINER and project.trainers.filter(id=user.id).exists():
+            pass
+        elif role == User.Role.LEARNER and project.learners.filter(id=user.id).exists():
+            pass
+        else:
+            return Response({"error": "Permission denied. You are not assigned to this project."}, status=status.HTTP_403_FORBIDDEN)
+
+        resource = get_object_or_404(ProjectResource, pk=resource_id, project=project)
+        if not resource.file:
+            raise Http404("File not found.")
+
+        # If using S3 storage backend with generate_url
+        use_s3 = getattr(settings, "USE_S3_STORAGE", False) or getattr(settings, "USE_S3", False)
+        if hasattr(resource.file.storage, "url") and use_s3:
+            try:
+                # S3 private bucket pre-signed URL (1 hour expiry)
+                s3_client = getattr(resource.file.storage, "bucket", None)
+                if hasattr(resource.file.storage, "connection"):
+                    presigned = resource.file.storage.connection.meta.client.generate_presigned_url(
+                        "get_object",
+                        Params={
+                            "Bucket": settings.AWS_STORAGE_BUCKET_NAME,
+                            "Key": resource.file.name,
+                            "ResponseContentDisposition": f'inline; filename="{resource.original_name}"',
+                        },
+                        ExpiresIn=3600,
+                    )
+                    from django.shortcuts import redirect
+                    return redirect(presigned)
+            except Exception as e:
+                logger.warning("Failed to generate S3 pre-signed URL for resource %s: %s", resource.pk, e)
+
+        # Local storage / fallback: stream securely with FileResponse
+        try:
+            file_handle = resource.file.open("rb")
+            content_type, _ = mimetypes.guess_type(resource.original_name)
+            response = FileResponse(file_handle, content_type=content_type or "application/octet-stream")
+            response["Content-Disposition"] = f'inline; filename="{resource.original_name}"'
+            return response
+        except Exception as e:
+            logger.exception("Error streaming file for resource %s: %s", resource.pk, e)
+            raise Http404("Unable to read resource file.")
+
+
+class ProjectSubmissionViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for handling learner project submissions, resubmissions, and trainer reviews.
+    Permissions:
+      - Admin: full view of all submissions.
+      - Trainer: view and review submissions for projects assigned to them.
+      - Learner: view their own submissions; submit/resubmit to assigned projects.
+    """
+    serializer_class = ProjectSubmissionSerializer
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def get_queryset(self):
+        user = self.request.user
+        role = _get_role(user)
+        project_id = self.request.query_params.get("project")
+
+        qs = ProjectSubmission.objects.select_related("project", "learner", "reviewed_by").prefetch_related("files")
+
+        if project_id:
+            qs = qs.filter(project_id=project_id)
+
+        if role == User.Role.ADMIN:
+            return qs
+
+        if role == User.Role.TRAINER:
+            # Trainers see submissions for projects they are assigned to
+            return qs.filter(project__trainers=user).distinct()
+
+        if role == User.Role.LEARNER:
+            # Learners only see their own submissions
+            return qs.filter(learner=user)
+
+        return ProjectSubmission.objects.none()
+
+    def create(self, request, *args, **kwargs):
+        """
+        Learner submits project work.
+        Enforces:
+          - Only learners assigned to the project can submit.
+          - Project must be ACTIVE.
+          - Deadline validation: if past due_date and allow_late_submissions is False, blocks submission.
+          - Computes sequential version number (v1, v2, etc.).
+          - Validates each attached file.
+        """
+        user = request.user
+        role = _get_role(user)
+        if role != User.Role.LEARNER:
+            return Response({"error": "Only learners can submit project work."}, status=status.HTTP_403_FORBIDDEN)
+
+        project_id = request.data.get("project")
+        if not project_id:
+            return Response({"error": "Field 'project' is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        project = get_object_or_404(Project, pk=project_id, is_deleted=False)
+
+        # Check assignment
+        if not project.learners.filter(id=user.id).exists():
+            return Response({"error": "Permission denied. You are not assigned to this project."}, status=status.HTTP_403_FORBIDDEN)
+
+        # Check project status
+        if project.status != Project.ProjectStatus.ACTIVE:
+            return Response({"error": f"Project is currently '{project.status}'. Submissions are only accepted for Active projects."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check deadline
+        from django.utils import timezone
+        now = timezone.now()
+        is_late = False
+        if project.due_date and now > project.due_date:
+            if not project.allow_late_submissions:
+                return Response(
+                    {"error": f"The submission deadline ({project.due_date.strftime('%Y-%m-%d %H:%M')}) has passed and late submissions are closed for this project."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            is_late = True
+
+        comments = request.data.get("comments", "").strip()
+        files = request.FILES.getlist("files")
+
+        if not files:
+            return Response({"error": "At least one project submission file is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate all files before saving anything
+        for f in files:
+            try:
+                validate_learning_material_file(f)
+            except ValidationError as val_err:
+                return Response({"error": f"File '{f.name}' validation failed: {val_err}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Compute next version number
+        latest_sub = ProjectSubmission.objects.filter(project=project, learner=user).order_by("-version").first()
+        next_version = (latest_sub.version + 1) if latest_sub else 1
+
+        with transaction.atomic():
+            submission = ProjectSubmission.objects.create(
+                project=project,
+                learner=user,
+                version=next_version,
+                status=ProjectSubmission.SubmissionStatus.SUBMITTED,
+                comments=comments,
+                is_late=is_late,
+            )
+
+            for f in files:
+                ProjectSubmissionFile.objects.create(
+                    submission=submission,
+                    file=f,
+                    original_name=f.name,
+                    file_size=f.size,
+                )
+
+            _log_audit(
+                request,
+                AuditAction.SUBMIT,
+                "ProjectSubmission",
+                submission.pk,
+                {
+                    "project_id": project.pk,
+                    "project_title": project.title,
+                    "version": submission.version,
+                    "is_late": is_late,
+                    "files_count": len(files),
+                },
+            )
+
+        return Response(ProjectSubmissionSerializer(submission, context={"request": request}).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="review")
+    def review_submission(self, request, pk=None):
+        """
+        Review learner project submission.
+        Admin or assigned Trainer only.
+        Allows setting status (UNDER_REVIEW, REVIEWED, CHANGES_REQUESTED, COMPLETED),
+        optional numeric score, and feedback text.
+        """
+        user = request.user
+        role = _get_role(user)
+
+        # Retrieve submission regardless of queryset scoping so unassigned trainers get 403 instead of 404
+        submission = get_object_or_404(ProjectSubmission, pk=pk)
+
+        # Check trainer authorization
+        if role != User.Role.ADMIN and not submission.project.trainers.filter(id=user.id).exists():
+            return Response({"error": "Permission denied. You are not assigned as a trainer for this project."}, status=status.HTTP_403_FORBIDDEN)
+
+        new_status = request.data.get("status")
+        trainer_feedback = request.data.get("feedback", "").strip()
+        score = request.data.get("score")
+
+        if not new_status or new_status not in ProjectSubmission.SubmissionStatus.values:
+            return Response(
+                {"error": f"Valid status is required: {', '.join(ProjectSubmission.SubmissionStatus.values)}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from django.utils import timezone
+        submission.status = new_status
+        submission.trainer_feedback = trainer_feedback
+        submission.reviewed_by = user
+        submission.reviewed_at = timezone.now()
+
+        if score is not None and score != "":
+            try:
+                numeric_score = float(score)
+                if numeric_score < 0 or (submission.max_score and numeric_score > float(submission.max_score)):
+                    return Response({"error": f"Score must be between 0 and {submission.max_score}"}, status=status.HTTP_400_BAD_REQUEST)
+                submission.score = numeric_score
+            except ValueError:
+                return Response({"error": "Score must be a valid number."}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            submission.score = None
+
+        submission.save(update_fields=["status", "trainer_feedback", "reviewed_by", "reviewed_at", "score"])
+
+        _log_audit(
+            request,
+            AuditAction.REVIEW,
+            "ProjectSubmission",
+            submission.pk,
+            {
+                "project_id": submission.project_id,
+                "learner": submission.learner.username,
+                "version": submission.version,
+                "status": submission.status,
+                "score": str(submission.score) if submission.score is not None else None,
+            },
+        )
+
+        return Response(ProjectSubmissionSerializer(submission, context={"request": request}).data)
+
+    @action(detail=True, methods=["get"], url_path=r"files/(?P<file_id>\d+)/download")
+    def download_submission_file(self, request, pk=None, file_id=None):
+        """
+        Secure download of learner submission files.
+        Allowed for:
+          - Admin
+          - Assigned Trainer
+          - The submitting Learner themselves
+        """
+        # Retrieve submission directly to return 403 (instead of 404) for unauthorized users
+        submission = get_object_or_404(ProjectSubmission, pk=pk)
+        user = request.user
+        role = _get_role(user)
+
+        is_admin = role == User.Role.ADMIN
+        is_assigned_trainer = role == User.Role.TRAINER and submission.project.trainers.filter(id=user.id).exists()
+        is_owner = submission.learner_id == user.id
+
+        if not (is_admin or is_assigned_trainer or is_owner):
+            return Response({"error": "Permission denied. You do not have access to this submission file."}, status=status.HTTP_403_FORBIDDEN)
+
+        sub_file = get_object_or_404(ProjectSubmissionFile, pk=file_id, submission=submission)
+        if not sub_file.file:
+            raise Http404("File not found.")
+
+        # S3 pre-signed URL redirect if S3 configured
+        use_s3 = getattr(settings, "USE_S3_STORAGE", False) or getattr(settings, "USE_S3", False)
+        if hasattr(sub_file.file.storage, "url") and use_s3:
+            try:
+                s3_client = getattr(sub_file.file.storage, "bucket", None)
+                if hasattr(sub_file.file.storage, "connection"):
+                    presigned = sub_file.file.storage.connection.meta.client.generate_presigned_url(
+                        "get_object",
+                        Params={
+                            "Bucket": settings.AWS_STORAGE_BUCKET_NAME,
+                            "Key": sub_file.file.name,
+                            "ResponseContentDisposition": f'inline; filename="{sub_file.original_name}"',
+                        },
+                        ExpiresIn=3600,
+                    )
+                    from django.shortcuts import redirect
+                    return redirect(presigned)
+            except Exception as e:
+                logger.warning("Failed to generate S3 pre-signed URL for submission file %s: %s", sub_file.pk, e)
+
+        # Local storage / fallback: stream securely with FileResponse
+        try:
+            file_handle = sub_file.file.open("rb")
+            content_type, _ = mimetypes.guess_type(sub_file.original_name)
+            response = FileResponse(file_handle, content_type=content_type or "application/octet-stream")
+            response["Content-Disposition"] = f'inline; filename="{sub_file.original_name}"'
+            return response
+        except Exception as e:
+            logger.exception("Error streaming submission file %s: %s", sub_file.pk, e)
+            raise Http404("Unable to read submission file.")
+
 
 
 

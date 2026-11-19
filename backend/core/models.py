@@ -10,7 +10,12 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
-from core.validators import training_file_upload_path, validate_learning_material_file
+from core.validators import (
+    project_resource_upload_path,
+    project_submission_upload_path,
+    training_file_upload_path,
+    validate_learning_material_file,
+)
 
 
 class PublicationStatus(models.TextChoices):
@@ -27,6 +32,9 @@ class AuditAction(models.TextChoices):
     ARCHIVE = "ARCHIVE", "Archive"
     ASSIGN = "ASSIGN", "Assign"
     CORRECT = "CORRECT", "Correct"
+    SUBMIT = "SUBMIT", "Submit"
+    REVIEW = "REVIEW", "Review"
+
 
 
 # =============================================================================
@@ -1039,3 +1047,218 @@ class TrainingFileMapping(models.Model):
         if self.submodule:
             loc += f" -> Lesson: {self.submodule.order}"
         return f"{self.training_file.filename} [{self.category}] ({loc})"
+
+
+# =============================================================================
+# 10. Projects Module: Project, ProjectResource, ProjectSubmission, ProjectSubmissionFile
+# =============================================================================
+
+class Project(models.Model):
+    """
+    Project model for People Prime LMS.
+    Supports Admin management, multi-trainer oversight, multi-learner assignments,
+    resource attachments, and milestone tracking.
+    """
+    class ProjectStatus(models.TextChoices):
+        DRAFT = "DRAFT", "Draft"
+        ACTIVE = "ACTIVE", "Active"
+        COMPLETED = "COMPLETED", "Completed"
+        ARCHIVED = "ARCHIVED", "Archived"
+
+    class Priority(models.TextChoices):
+        LOW = "LOW", "Low"
+        MEDIUM = "MEDIUM", "Medium"
+        HIGH = "HIGH", "High"
+        URGENT = "URGENT", "Urgent"
+
+    title = models.CharField(max_length=200)
+    description = models.TextField(blank=True, default="")
+    instructions = models.TextField(blank=True, default="", help_text="Detailed instructions for learners")
+    objectives = models.TextField(blank=True, default="", help_text="Learning objectives and goals")
+    start_date = models.DateField(null=True, blank=True)
+    due_date = models.DateTimeField(null=True, blank=True, help_text="Final submission deadline")
+    status = models.CharField(
+        max_length=20,
+        choices=ProjectStatus.choices,
+        default=ProjectStatus.DRAFT,
+        db_index=True,
+    )
+    priority = models.CharField(
+        max_length=20,
+        choices=Priority.choices,
+        default=Priority.MEDIUM,
+        blank=True,
+    )
+    allow_late_submissions = models.BooleanField(
+        default=True,
+        help_text="If False, submissions past the due date will be blocked unless authorized.",
+    )
+    is_deleted = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Soft-delete flag to protect learner submission history.",
+    )
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_projects",
+    )
+    trainers = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        related_name="assigned_trainer_projects",
+        blank=True,
+        help_text="Trainers assigned to oversee and review this project",
+    )
+    learners = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        related_name="assigned_learner_projects",
+        blank=True,
+        help_text="Learners assigned to complete this project",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Project"
+        verbose_name_plural = "Projects"
+
+    def __str__(self):
+        return f"{self.title} ({self.status})"
+
+
+class ProjectResource(models.Model):
+    """
+    Project guidance documents, templates, or resources provided by Admin/Trainers.
+    Stored securely in private S3/local media storage.
+    """
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name="resources",
+    )
+    file = models.FileField(
+        upload_to=project_resource_upload_path,
+        validators=[validate_learning_material_file],
+        help_text="Attached project material or template",
+    )
+    original_name = models.CharField(max_length=255)
+    file_size = models.BigIntegerField(default=0, help_text="File size in bytes")
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="uploaded_project_resources",
+    )
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["uploaded_at"]
+
+    def __str__(self):
+        return f"{self.original_name} (Project #{self.project_id})"
+
+
+class ProjectSubmission(models.Model):
+    """
+    Learner project submission record.
+    Preserves version history — resubmissions create a new version record or update cleanly
+    without destroying historical submissions.
+    """
+    class SubmissionStatus(models.TextChoices):
+        SUBMITTED = "SUBMITTED", "Submitted"
+        UNDER_REVIEW = "UNDER_REVIEW", "Under Review"
+        REVIEWED = "REVIEWED", "Reviewed"
+        CHANGES_REQUESTED = "CHANGES_REQUESTED", "Changes Requested"
+        COMPLETED = "COMPLETED", "Completed"
+
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name="submissions",
+    )
+    learner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="project_submissions",
+    )
+    version = models.PositiveIntegerField(default=1, help_text="Sequential submission version")
+    status = models.CharField(
+        max_length=30,
+        choices=SubmissionStatus.choices,
+        default=SubmissionStatus.SUBMITTED,
+        db_index=True,
+    )
+    comments = models.TextField(blank=True, default="", help_text="Learner notes or explanation of work")
+    is_late = models.BooleanField(default=False, help_text="Indicates whether submission was made past due_date")
+    submitted_at = models.DateTimeField(auto_now_add=True)
+
+    # Review & Evaluation (Optional grading)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_project_submissions",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    trainer_feedback = models.TextField(blank=True, default="")
+    score = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Optional numeric score or percentage (e.g. 85.50)",
+    )
+    max_score = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        default=100.00,
+        help_text="Maximum possible score",
+    )
+
+    class Meta:
+        ordering = ["-version", "-submitted_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "learner", "version"],
+                name="unique_project_learner_submission_version",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.project.title} - {self.learner.username} (v{self.version}: {self.status})"
+
+
+class ProjectSubmissionFile(models.Model):
+    """
+    Physical files uploaded as part of a learner's project submission.
+    Stored securely in private S3/local media storage.
+    """
+    submission = models.ForeignKey(
+        ProjectSubmission,
+        on_delete=models.CASCADE,
+        related_name="files",
+    )
+    file = models.FileField(
+        upload_to=project_submission_upload_path,
+        validators=[validate_learning_material_file],
+        help_text="Learner submission file",
+    )
+    original_name = models.CharField(max_length=255)
+    file_size = models.BigIntegerField(default=0, help_text="File size in bytes")
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["uploaded_at"]
+
+    def __str__(self):
+        return f"{self.original_name} (Submission #{self.submission_id})"
+

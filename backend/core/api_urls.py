@@ -37,9 +37,13 @@ from core.api_views import (
     TrainingFileViewSet,
     TrainingClusterViewSet,
     TrainingFileMappingViewSet,
+    ProjectViewSet,
+    ProjectSubmissionViewSet,
 )
 
 router = DefaultRouter()
+router.register(r"projects", ProjectViewSet, basename="project")
+router.register(r"project-submissions", ProjectSubmissionViewSet, basename="project-submission")
 router.register(r"courses", CourseViewSet, basename="course")
 router.register(r"course-levels", CourseLevelViewSet, basename="course-level")
 router.register(r"modules", ModuleViewSet, basename="module")

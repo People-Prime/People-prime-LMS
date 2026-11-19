@@ -21,6 +21,10 @@ from core.models import (
     ModuleFeedback,
     ModuleQuestion,
     ModuleQuestionResponse,
+    Project,
+    ProjectResource,
+    ProjectSubmission,
+    ProjectSubmissionFile,
     QuestionType,
     Submodule,
     TrainerGroupAssignment,
@@ -1898,6 +1902,242 @@ class TrainingFileMappingSerializer(serializers.ModelSerializer):
                 })
 
         return attrs
+
+
+# =============================================================================
+# 11. Project Serializers
+# =============================================================================
+
+class ProjectResourceSerializer(serializers.ModelSerializer):
+    """
+    Serializer for ProjectResource files.
+    """
+    uploaded_by_name = serializers.SerializerMethodField()
+    download_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProjectResource
+        fields = [
+            "id",
+            "project",
+            "original_name",
+            "file_size",
+            "uploaded_by",
+            "uploaded_by_name",
+            "uploaded_at",
+            "download_url",
+        ]
+        read_only_fields = ["id", "file_size", "uploaded_by", "uploaded_by_name", "uploaded_at", "download_url"]
+
+    def get_uploaded_by_name(self, obj):
+        if obj.uploaded_by:
+            name = f"{obj.uploaded_by.first_name} {obj.uploaded_by.last_name}".strip()
+            return name or obj.uploaded_by.username
+        return None
+
+    def get_download_url(self, obj):
+        return f"/api/projects/{obj.project_id}/resources/{obj.id}/download/"
+
+
+class ProjectSubmissionFileSerializer(serializers.ModelSerializer):
+    """
+    Serializer for files attached to a project submission.
+    """
+    download_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProjectSubmissionFile
+        fields = [
+            "id",
+            "submission",
+            "original_name",
+            "file_size",
+            "uploaded_at",
+            "download_url",
+        ]
+        read_only_fields = ["id", "submission", "file_size", "uploaded_at", "download_url"]
+
+    def get_download_url(self, obj):
+        return f"/api/project-submissions/{obj.submission_id}/files/{obj.id}/download/"
+
+
+class ProjectSubmissionSerializer(serializers.ModelSerializer):
+    """
+    Serializer for ProjectSubmission records with version history, learner details,
+    attached files, and review/feedback data.
+    """
+    files = ProjectSubmissionFileSerializer(many=True, read_only=True)
+    learner_name = serializers.SerializerMethodField()
+    learner_email = serializers.ReadOnlyField(source="learner.email")
+    learner_username = serializers.ReadOnlyField(source="learner.username")
+    reviewed_by_name = serializers.SerializerMethodField()
+    project_title = serializers.ReadOnlyField(source="project.title")
+
+    class Meta:
+        model = ProjectSubmission
+        fields = [
+            "id",
+            "project",
+            "project_title",
+            "learner",
+            "learner_username",
+            "learner_name",
+            "learner_email",
+            "version",
+            "status",
+            "comments",
+            "is_late",
+            "submitted_at",
+            "reviewed_by",
+            "reviewed_by_name",
+            "reviewed_at",
+            "trainer_feedback",
+            "score",
+            "max_score",
+            "files",
+        ]
+        read_only_fields = [
+            "id",
+            "project_title",
+            "learner",
+            "learner_username",
+            "learner_name",
+            "learner_email",
+            "version",
+            "status",
+            "is_late",
+            "submitted_at",
+            "reviewed_by",
+            "reviewed_by_name",
+            "reviewed_at",
+            "trainer_feedback",
+            "score",
+            "max_score",
+            "files",
+        ]
+
+    def get_learner_name(self, obj):
+        if obj.learner:
+            full = f"{obj.learner.first_name} {obj.learner.last_name}".strip()
+            return full or obj.learner.username
+        return ""
+
+    def get_reviewed_by_name(self, obj):
+        if obj.reviewed_by:
+            full = f"{obj.reviewed_by.first_name} {obj.reviewed_by.last_name}".strip()
+            return full or obj.reviewed_by.username
+        return None
+
+
+class ProjectUserSummarySerializer(serializers.ModelSerializer):
+    """
+    Lightweight user serializer for trainer and learner assignment displays.
+    """
+    full_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "email", "full_name", "role"]
+
+    def get_full_name(self, obj):
+        full = f"{obj.first_name} {obj.last_name}".strip()
+        return full or obj.username
+
+
+class ProjectSerializer(serializers.ModelSerializer):
+    """
+    Primary Project serializer.
+    Includes assigned trainers/learners, resources, and aggregated submission stats.
+    """
+    created_by_username = serializers.ReadOnlyField(source="created_by.username")
+    created_by_name = serializers.SerializerMethodField()
+    trainers_detail = ProjectUserSummarySerializer(source="trainers", many=True, read_only=True)
+    learners_detail = ProjectUserSummarySerializer(source="learners", many=True, read_only=True)
+    resources = ProjectResourceSerializer(many=True, read_only=True)
+    
+    # Aggregated metrics for dashboards
+    trainers_count = serializers.IntegerField(source="trainers.count", read_only=True)
+    learners_count = serializers.IntegerField(source="learners.count", read_only=True)
+    submissions_count = serializers.SerializerMethodField()
+    pending_reviews_count = serializers.SerializerMethodField()
+    user_submission = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Project
+        fields = [
+            "id",
+            "title",
+            "description",
+            "instructions",
+            "objectives",
+            "start_date",
+            "due_date",
+            "status",
+            "priority",
+            "allow_late_submissions",
+            "created_by",
+            "created_by_username",
+            "created_by_name",
+            "trainers",
+            "trainers_detail",
+            "trainers_count",
+            "learners",
+            "learners_detail",
+            "learners_count",
+            "resources",
+            "submissions_count",
+            "pending_reviews_count",
+            "user_submission",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "created_by",
+            "created_by_username",
+            "created_by_name",
+            "trainers_detail",
+            "trainers_count",
+            "learners_detail",
+            "learners_count",
+            "resources",
+            "submissions_count",
+            "pending_reviews_count",
+            "user_submission",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_created_by_name(self, obj):
+        if obj.created_by:
+            full = f"{obj.created_by.first_name} {obj.created_by.last_name}".strip()
+            return full or obj.created_by.username
+        return ""
+
+    def get_submissions_count(self, obj):
+        return obj.submissions.values("learner_id").distinct().count()
+
+    def get_pending_reviews_count(self, obj):
+        # Latest submission per learner that is SUBMITTED or UNDER_REVIEW
+        return obj.submissions.filter(
+            status__in=[
+                ProjectSubmission.SubmissionStatus.SUBMITTED,
+                ProjectSubmission.SubmissionStatus.UNDER_REVIEW,
+            ]
+        ).values("learner_id").distinct().count()
+
+    def get_user_submission(self, obj):
+        """
+        If request user is a learner, return their latest submission record.
+        """
+        request = self.context.get("request")
+        if request and request.user.is_authenticated:
+            # If user is a learner, return their latest submission
+            latest = obj.submissions.filter(learner=request.user).order_by("-version").first()
+            if latest:
+                return ProjectSubmissionSerializer(latest, context=self.context).data
+        return None
+
 
 
 

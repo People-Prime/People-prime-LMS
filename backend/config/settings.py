@@ -29,7 +29,7 @@ allowed_hosts_raw = os.getenv("ALLOWED_HOSTS", "")
 if allowed_hosts_raw:
     ALLOWED_HOSTS = [h.strip() for h in allowed_hosts_raw.split(",") if h.strip()]
 elif DEBUG:
-    ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+    ALLOWED_HOSTS = ["127.0.0.1", "localhost", "testserver"]
 else:
     raise ValueError("The ALLOWED_HOSTS environment variable must be configured when DEBUG is False.")
 

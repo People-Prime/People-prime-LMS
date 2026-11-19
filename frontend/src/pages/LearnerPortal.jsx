@@ -3,13 +3,14 @@ import DashboardLayout from "../components/DashboardLayout";
 import { useAuth } from "../hooks/useAuth";
 import LearnerOverviewTab from "./learner/LearnerOverviewTab";
 import LearnerCoursesTab from "./learner/LearnerCoursesTab";
+import LearnerProjectsTab from "./learner/LearnerProjectsTab";
 import AdminReportsTab from "./admin/AdminReportsTab";
 
 export default function LearnerPortal() {
   const { user, activePortal } = useAuth();
   const isAdminPreview = user?.role === "ADMIN" && activePortal === "LEARNER";
 
-  const [activeTab, setActiveTab] = useState("overview"); // 'overview' | 'mycourses' | 'reports'
+  const [activeTab, setActiveTab] = useState("overview"); // 'overview' | 'mycourses' | 'projects' | 'reports'
   const [selectedCourseFromDashboard, setSelectedCourseFromDashboard] = useState(null);
 
   const learnerDisplayName = user?.first_name || user?.username || "Learner";
@@ -38,6 +39,8 @@ export default function LearnerPortal() {
             ? "Learner Dashboard"
             : activeTab === "mycourses"
             ? "My Learning"
+            : activeTab === "projects"
+            ? "Assigned Projects & Deliverables"
             : "My Progress Reports"}
         </h1>
         <p className="dashboard-subtitle">
@@ -47,6 +50,8 @@ export default function LearnerPortal() {
             ? `Welcome back, ${learnerDisplayName}! Keep up the momentum and continue your training journey.`
             : activeTab === "mycourses"
             ? `Welcome back, ${learnerDisplayName}. View your assigned courses and modules.`
+            : activeTab === "projects"
+            ? `Welcome back, ${learnerDisplayName}. View assigned projects, reference documents, and submit your project work.`
             : `Welcome back, ${learnerDisplayName}. Track your personal course progress, module completion, and assessment results.`}
         </p>
       </div>
@@ -64,6 +69,10 @@ export default function LearnerPortal() {
           initialSelectedCourse={selectedCourseFromDashboard}
           onClearSelectedCourse={handleClearSelectedCourse}
         />
+      )}
+
+      {activeTab === "projects" && (
+        <LearnerProjectsTab />
       )}
 
       {activeTab === "reports" && (

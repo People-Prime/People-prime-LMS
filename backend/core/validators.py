@@ -138,3 +138,39 @@ def material_version_upload_path(instance, filename):
     version_tag = f"v{getattr(instance, 'version_number', 1)}"
     return os.path.join("learning_materials", "versions", material_folder, f"{version_tag}_{unique_id}_{safe_name}{ext}")
 
+
+def project_resource_upload_path(instance, filename):
+    """
+    Generates a secure, structured storage path for project resources:
+    project_resources/project_<project_id>/<uuid>_<slugified_filename>
+    """
+    ext = os.path.splitext(filename)[1].lower()
+    base_name = os.path.splitext(filename)[0]
+    safe_name = slugify(base_name) or "resource"
+    unique_id = uuid.uuid4().hex[:10]
+    proj_id = getattr(instance, "project_id", None) or "unassigned"
+    return os.path.join("project_resources", f"project_{proj_id}", f"{unique_id}_{safe_name}{ext}")
+
+
+def project_submission_upload_path(instance, filename):
+    """
+    Generates a secure, structured storage path for learner project submissions:
+    project_submissions/project_<project_id>/learner_<learner_id>/v<version>/<uuid>_<slugified_filename>
+    """
+    ext = os.path.splitext(filename)[1].lower()
+    base_name = os.path.splitext(filename)[0]
+    safe_name = slugify(base_name) or "submission"
+    unique_id = uuid.uuid4().hex[:10]
+    submission = getattr(instance, "submission", None)
+    proj_id = getattr(submission, "project_id", "general") if submission else "general"
+    learner_id = getattr(submission, "learner_id", "unknown") if submission else "unknown"
+    version = getattr(submission, "version", 1) if submission else 1
+    return os.path.join(
+        "project_submissions",
+        f"project_{proj_id}",
+        f"learner_{learner_id}",
+        f"v{version}",
+        f"{unique_id}_{safe_name}{ext}",
+    )
+
+
