@@ -207,14 +207,14 @@ export default function AdminProjectsTab() {
       if (editingProject) {
         const updated = await apiClient(`/projects/${editingProject.id}/`, {
           method: "PATCH",
-          body: JSON.stringify(payload),
+          body: payload,
         });
         setProjects((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
         setSuccessMessage(`Project "${updated.title}" updated successfully.`);
       } else {
         const created = await apiClient("/projects/", {
           method: "POST",
-          body: JSON.stringify(payload),
+          body: payload,
         });
         setProjects((prev) => [created, ...prev]);
         setSuccessMessage(`Project "${created.title}" created successfully.`);
@@ -249,10 +249,10 @@ export default function AdminProjectsTab() {
     try {
       const res = await apiClient(`/projects/${assigningProject.id}/assign/`, {
         method: "POST",
-        body: JSON.stringify({
+        body: {
           trainers: selectedTrainers,
           learners: selectedLearners,
-        }),
+        },
       });
 
       setProjects((prev) => prev.map((p) => (p.id === res.id ? res : p)));

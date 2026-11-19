@@ -113,6 +113,16 @@ export async function apiClient(endpoint, options = {}) {
   if (body && typeof body === "object" && !(body instanceof FormData) && !(body instanceof Blob)) {
     headers["Content-Type"] = "application/json";
     body = JSON.stringify(body);
+  } else if (typeof body === "string" && !headers["Content-Type"]) {
+    // If caller provided a string body without explicit Content-Type,
+    // detect JSON strings to prevent browser default text/plain;charset=UTF-8
+    const trimmed = body.trim();
+    if (
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    ) {
+      headers["Content-Type"] = "application/json";
+    }
   }
 
   const fetchConfig = {

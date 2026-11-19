@@ -72,14 +72,40 @@ export default function FileViewerPage() {
     };
   }, [fileIdParam, rawUrlParam, isAdmin]);
 
-  const previewUrl = fileIdParam ? getTrainingFileDownloadUrl(fileIdParam) : rawUrlParam;
+  const rawPreviewUrl = fileIdParam ? getTrainingFileDownloadUrl(fileIdParam) : rawUrlParam;
   const fileName =
     titleParam ||
     fileDetails?.filename ||
-    (previewUrl ? decodeURIComponent(previewUrl.split("/").pop().split("?")[0]) : "Training Document");
+    (rawPreviewUrl ? decodeURIComponent(rawPreviewUrl.split("/").pop().split("?")[0]) : "Training Document");
 
   const ext = (fileName.split(".").pop() || "").toUpperCase();
   const isImage = ["PNG", "JPG", "JPEG", "WEBP", "GIF"].includes(ext);
+  const isDocx = ["DOCX", "DOC"].includes(ext);
+  const isPdf = ext === "PDF";
+  const isSupportedPreview = isPdf || isDocx || isImage;
+
+  // For Project resources/submissions or training files that require server-side DOCX preview conversion,
+  // append ?preview=true if not already present
+  const previewUrl = (() => {
+    if (!rawPreviewUrl) return "";
+    if (isDocx && !rawPreviewUrl.includes("preview=")) {
+      return rawPreviewUrl.includes("?") ? `${rawPreviewUrl}&preview=true` : `${rawPreviewUrl}?preview=true`;
+    }
+    return rawPreviewUrl;
+  })();
+
+  // Original download URL without preview flag for direct file download
+  const downloadUrl = (() => {
+    if (!rawPreviewUrl) return "";
+    // Remove preview=true if present
+    try {
+      const parsed = new URL(rawPreviewUrl, window.location.origin);
+      parsed.searchParams.delete("preview");
+      return parsed.pathname + (parsed.search ? parsed.search : "");
+    } catch {
+      return rawPreviewUrl.replace(/[?&]preview=true/g, "").replace(/\?$/, "");
+    }
+  })();
 
   const handleClose = () => {
     if (window.opener) {
@@ -153,22 +179,46 @@ export default function FileViewerPage() {
           <span style={{ fontSize: "12px", color: "#64748b", fontWeight: "500" }}>&bull; Read-Only Preview</span>
         </div>
 
-        <button
-          type="button"
-          className="btn btn-secondary"
-          onClick={handleClose}
-          style={{
-            padding: "5px 14px",
-            fontSize: "12px",
-            backgroundColor: "#f1f5f9",
-            color: "#1e293b",
-            borderColor: "#cbd5e1",
-            fontWeight: "500",
-          }}
-          title="Close this document tab"
-        >
-          &times; Close
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          {downloadUrl && (
+            <a
+              href={downloadUrl}
+              download={fileName}
+              className="btn btn-secondary"
+              style={{
+                padding: "5px 12px",
+                fontSize: "12px",
+                backgroundColor: "#f1f5f9",
+                color: "#1e293b",
+                borderColor: "#cbd5e1",
+                fontWeight: "500",
+                textDecoration: "none",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "5px",
+              }}
+              title="Download original document file"
+            >
+              <span>⬇</span> Download
+            </a>
+          )}
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={handleClose}
+            style={{
+              padding: "5px 14px",
+              fontSize: "12px",
+              backgroundColor: "#f1f5f9",
+              color: "#1e293b",
+              borderColor: "#cbd5e1",
+              fontWeight: "500",
+            }}
+            title="Close this document tab"
+          >
+            &times; Close
+          </button>
+        </div>
       </header>
 
       {/* Main Content Area */}
@@ -194,6 +244,45 @@ export default function FileViewerPage() {
             <div style={{ fontSize: "36px", marginBottom: "12px" }}>⚠️</div>
             <h3 style={{ margin: "0 0 6px 0", fontSize: "16px", color: "#991b1b" }}>Preview Error</h3>
             <p style={{ margin: 0, fontSize: "13px" }}>{error}</p>
+          </div>
+        ) : !isSupportedPreview ? (
+          <div
+            style={{
+              display: "flex",
+              height: "100%",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "#334155",
+              padding: "24px",
+              textAlign: "center",
+            }}
+          >
+            <div style={{ fontSize: "44px", marginBottom: "16px" }}>📄</div>
+            <h3 style={{ margin: "0 0 8px 0", fontSize: "17px", color: "#0f172a", fontWeight: "600" }}>
+              Preview is not available for this file type
+            </h3>
+            <p style={{ margin: "0 0 20px 0", fontSize: "14px", color: "#64748b", maxWidth: "440px", lineHeight: "1.5" }}>
+              Direct inline preview is not supported for <strong>{ext || "this format"}</strong> documents. You can download the original file to view it on your device.
+            </p>
+            {downloadUrl && (
+              <a
+                href={downloadUrl}
+                download={fileName}
+                className="btn btn-primary"
+                style={{
+                  padding: "8px 18px",
+                  fontSize: "13px",
+                  fontWeight: "600",
+                  textDecoration: "none",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "6px",
+                }}
+              >
+                <span>⬇</span> Download {ext ? `${ext} File` : "File"}
+              </a>
+            )}
           </div>
         ) : isImage ? (
           <div

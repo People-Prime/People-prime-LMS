@@ -6562,6 +6562,42 @@ class ProjectViewSet(viewsets.ModelViewSet):
         if not resource.file:
             raise Http404("File not found.")
 
+        content_type, _ = mimetypes.guess_type(resource.original_name)
+
+        # Check if file is DOCX for read-only preview conversion
+        is_preview_request = request.query_params.get("preview", "").lower() in ("true", "1", "yes")
+        is_docx = (
+            resource.original_name.lower().endswith(".docx")
+            or resource.original_name.lower().endswith(".doc")
+            or (content_type and "wordprocessingml" in content_type)
+        )
+
+        if is_preview_request and is_docx:
+            from core.document_preview import get_or_create_docx_preview
+            try:
+                preview_pdf_path = get_or_create_docx_preview(resource)
+                preview_file_size = os.path.getsize(preview_pdf_path)
+                preview_filename = os.path.splitext(resource.original_name)[0] + ".pdf"
+                response = FileResponse(
+                    open(preview_pdf_path, "rb"),
+                    content_type="application/pdf",
+                )
+                response["Content-Disposition"] = f'inline; filename="{preview_filename}"'
+                response["Content-Length"] = preview_file_size
+                response["Cache-Control"] = "private, no-cache, no-store, must-revalidate"
+                response["X-Content-Type-Options"] = "nosniff"
+                response["X-Frame-Options"] = "SAMEORIGIN"
+                return response
+            except Exception as e:
+                logger.error("DOCX preview generation error for project resource %s: %s", resource.pk, e)
+                return Response(
+                    {
+                        "error": "Failed to generate read-only document preview.",
+                        "filename": resource.original_name,
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
         # If using S3 storage backend with generate_url
         use_s3 = getattr(settings, "USE_S3_STORAGE", False) or getattr(settings, "USE_S3", False)
         if hasattr(resource.file.storage, "url") and use_s3:
@@ -6809,6 +6845,42 @@ class ProjectSubmissionViewSet(viewsets.ModelViewSet):
         sub_file = get_object_or_404(ProjectSubmissionFile, pk=file_id, submission=submission)
         if not sub_file.file:
             raise Http404("File not found.")
+
+        content_type, _ = mimetypes.guess_type(sub_file.original_name)
+
+        # Check if file is DOCX for read-only preview conversion
+        is_preview_request = request.query_params.get("preview", "").lower() in ("true", "1", "yes")
+        is_docx = (
+            sub_file.original_name.lower().endswith(".docx")
+            or sub_file.original_name.lower().endswith(".doc")
+            or (content_type and "wordprocessingml" in content_type)
+        )
+
+        if is_preview_request and is_docx:
+            from core.document_preview import get_or_create_docx_preview
+            try:
+                preview_pdf_path = get_or_create_docx_preview(sub_file)
+                preview_file_size = os.path.getsize(preview_pdf_path)
+                preview_filename = os.path.splitext(sub_file.original_name)[0] + ".pdf"
+                response = FileResponse(
+                    open(preview_pdf_path, "rb"),
+                    content_type="application/pdf",
+                )
+                response["Content-Disposition"] = f'inline; filename="{preview_filename}"'
+                response["Content-Length"] = preview_file_size
+                response["Cache-Control"] = "private, no-cache, no-store, must-revalidate"
+                response["X-Content-Type-Options"] = "nosniff"
+                response["X-Frame-Options"] = "SAMEORIGIN"
+                return response
+            except Exception as e:
+                logger.error("DOCX preview generation error for submission file %s: %s", sub_file.pk, e)
+                return Response(
+                    {
+                        "error": "Failed to generate read-only document preview.",
+                        "filename": sub_file.original_name,
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
 
         # S3 pre-signed URL redirect if S3 configured
         use_s3 = getattr(settings, "USE_S3_STORAGE", False) or getattr(settings, "USE_S3", False)
