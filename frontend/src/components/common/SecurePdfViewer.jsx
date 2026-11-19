@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useRef } from "react";
+ import React, { useState, useEffect, useRef } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
-// Set worker source to the local static worker file in /public
+// Configure worker using Vite's URL import so it is properly bundled and served
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 /**
