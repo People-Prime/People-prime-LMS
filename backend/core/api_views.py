@@ -34,6 +34,7 @@ from core.models import (
     CandidateType,
     Course,
     CourseLevel,
+    DocumentCategory,
     GroupMembership,
     LearnerGroup,
     LearnerSubmoduleProgress,
@@ -913,34 +914,66 @@ class ModuleViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"], url_path="insert")
     def insert_module(self, request):
         """
-        Insert a module at any position within a level or course:
-        - "beginning": at the start of the level
-        - "before": before a reference module
-        - "after": after a reference module
-        - "end": at the end of the level
-        Automatically adjusts module orders to prevent duplicate or conflicting orders.
+        Inserts one or more modules at a specified position within a Level / Course:
+        - "beginning": inserted as the first module(s)
+        - "before": inserted right before reference_module_id
+        - "after": inserted right after reference_module_id
+        - "end": appended at the end of the level
+        Supports single insertion and bulk insertion (via `items` list).
+        Supports optional association with existing `TrainingFile` records via `training_file_id`.
+        Atomically shifts sequence orders using collision-free 2-phase resequencing.
+        Logs audit events for each created module and mapping.
         """
         self._require_admin()
         data = request.data
-        course_id = data.get("course")
-        level_id = data.get("level")
-        name = data.get("name", "").strip()
-        description = data.get("description", "").strip()
-        raw_duration = data.get("estimated_duration_minutes")
-        if raw_duration is None or str(raw_duration).strip() == "":
-            duration = 0
-        else:
-            try:
-                duration = max(0, int(raw_duration))
-            except (ValueError, TypeError):
-                duration = 0
-        status_val = data.get("status", PublicationStatus.DRAFT)
+        course_id = data.get("course") or data.get("course_id")
+        level_id = data.get("level") or data.get("level_id")
         position = data.get("position", "end") # "beginning" | "before" | "after" | "end"
         ref_module_id = data.get("reference_module_id")
 
-        if not name or (not course_id and not level_id):
+        # Determine if single or bulk insertion
+        items = data.get("items")
+        if not items or not isinstance(items, list):
+            # Single item payload fallback
+            name = data.get("name", "").strip()
+            description = data.get("description", "").strip()
+            raw_duration = data.get("estimated_duration_minutes")
+            try:
+                duration = max(0, int(raw_duration)) if raw_duration is not None and str(raw_duration).strip() != "" else 0
+            except (ValueError, TypeError):
+                duration = 0
+            status_val = data.get("status", PublicationStatus.DRAFT)
+            training_file_id = data.get("training_file_id")
+
+            if not name:
+                return Response(
+                    {"error": "Module Name is required."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            items = [{
+                "name": name,
+                "description": description,
+                "estimated_duration_minutes": duration,
+                "status": status_val,
+                "training_file_id": training_file_id,
+            }]
+        else:
+            # Validate items list
+            if len(items) == 0:
+                return Response(
+                    {"error": "At least one module item is required for insertion."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            for idx, it in enumerate(items):
+                if not it.get("name", "").strip():
+                    return Response(
+                        {"error": f"Module name is required for item #{idx + 1}."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+        if not course_id and not level_id:
             return Response(
-                {"error": "Module Name and Level (or Course) are required."},
+                {"error": "Level (or Course) is required."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -959,6 +992,21 @@ class ModuleViewSet(viewsets.ModelViewSet):
                 return Response({"error": "Selected Level does not exist."}, status=status.HTTP_404_NOT_FOUND)
             if course and level.course_id and level.course_id != course.id:
                 return Response({"error": "Selected Level does not exist in this course."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Pre-validate all training_file_ids
+        tf_ids = [it.get("training_file_id") for it in items if it.get("training_file_id")]
+        tf_map = {}
+        if tf_ids:
+            found_tfs = TrainingFile.objects.filter(id__in=tf_ids)
+            tf_map = {tf.id: tf for tf in found_tfs}
+            for fid in tf_ids:
+                if fid not in tf_map:
+                    return Response(
+                        {"error": f"The selected training material (ID: {fid}) does not exist."},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+
+        k = len(items)
 
         with transaction.atomic():
             scope_qs = Module.objects.filter(course=course) if course else Module.objects.filter(level=level)
@@ -998,40 +1046,107 @@ class ModuleViewSet(viewsets.ModelViewSet):
                 else:
                     target_order = 1
 
-            # Step 1: Temporarily shift all modules with order >= target_order to avoid unique constraint collisions
-            # Using offset of +100000
+            # Step 1: Temporarily shift all modules with order >= target_order by +100000 to avoid unique constraint collisions
             modules_to_shift = scope_qs.filter(order__gte=target_order).order_by("-order")
             for m in modules_to_shift:
                 m.order = m.order + 100000
                 m.save(update_fields=["order"])
 
-            # Step 2: Create new module at target_order
-            new_module = Module.objects.create(
-                course=course,
-                level=level,
-                name=name,
-                description=description,
-                order=target_order,
-                estimated_duration_minutes=duration,
-                status=status_val,
-                created_by=request.user,
-            )
+            created_modules = []
+            created_mappings = []
 
-            # Step 3: Shift shifted modules to their final (old_order + 1)
+            # Step 2: Create new module(s) sequentially at target_order + idx
+            for idx, item in enumerate(items):
+                item_name = item.get("name", "").strip()
+                item_desc = item.get("description", "").strip()
+                raw_dur = item.get("estimated_duration_minutes")
+                try:
+                    item_dur = max(0, int(raw_dur)) if raw_dur is not None and str(raw_dur).strip() != "" else 0
+                except (ValueError, TypeError):
+                    item_dur = 0
+                item_status = item.get("status", PublicationStatus.DRAFT)
+                item_tf_id = item.get("training_file_id")
+                item_tf = tf_map.get(item_tf_id) if item_tf_id else None
+
+                new_mod = Module.objects.create(
+                    course=course,
+                    level=level,
+                    name=item_name,
+                    description=item_desc,
+                    order=target_order + idx,
+                    estimated_duration_minutes=item_dur,
+                    status=item_status,
+                    created_by=request.user,
+                )
+                created_modules.append(new_mod)
+
+                # Step 3: Link TrainingFile if selected
+                if item_tf:
+                    cluster = None
+                    existing_mapping = (
+                        TrainingFileMapping.objects.filter(training_file=item_tf)
+                        .exclude(cluster__isnull=True)
+                        .first()
+                    )
+                    if existing_mapping and existing_mapping.cluster:
+                        cluster = existing_mapping.cluster
+                    elif course:
+                        cluster = TrainingCluster.objects.filter(course=course).first()
+
+                    if not cluster:
+                        cluster = TrainingCluster.objects.filter(code__iexact="CLUSTER-1").first()
+
+                    mapping, _ = TrainingFileMapping.objects.get_or_create(
+                        training_file=item_tf,
+                        module=new_mod,
+                        submodule=None,
+                        defaults={
+                            "cluster": cluster,
+                            "category": DocumentCategory.PRIMARY_INSTRUCTIONAL,
+                            "notes": f"Inserted from repository for module: {new_mod.name}",
+                        },
+                    )
+                    created_mappings.append(mapping)
+
+                    _log_audit(
+                        request,
+                        AuditAction.CREATE,
+                        "TrainingFileMapping",
+                        mapping.pk,
+                        {
+                            "training_file_id": item_tf.id,
+                            "training_file_name": item_tf.filename,
+                            "module_id": new_mod.id,
+                            "module_name": new_mod.name,
+                        },
+                    )
+
+                _log_audit(
+                    request,
+                    AuditAction.CREATE,
+                    "Module",
+                    new_mod.pk,
+                    {"name": new_mod.name, "order": new_mod.order, "level": level.id if level else None},
+                )
+
+            # Step 4: Shift shifted modules back by (order - 100000 + k)
             for m in scope_qs.filter(order__gte=100000).order_by("order"):
-                m.order = (m.order - 100000) + 1
+                m.order = (m.order - 100000) + k
                 m.save(update_fields=["order"])
 
-            _log_audit(
-                request,
-                AuditAction.CREATE,
-                "Module",
-                new_module.pk,
-                {"name": new_module.name, "order": new_module.order, "level": level.id if level else None},
-            )
-
-            serializer = self.get_serializer(new_module)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            if len(created_modules) == 1:
+                serializer = self.get_serializer(created_modules[0])
+                data_resp = serializer.data
+                data_resp["created_count"] = 1
+                return Response(data_resp, status=status.HTTP_201_CREATED)
+            else:
+                serializer = self.get_serializer(created_modules, many=True)
+                return Response({
+                    "created_count": len(created_modules),
+                    "modules": serializer.data,
+                    "mappings_count": len(created_mappings),
+                    "message": f"Successfully created {len(created_modules)} module(s).",
+                }, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["post"], url_path="reorder")
     def reorder_modules(self, request):
@@ -5479,26 +5594,44 @@ class ReportsViewSet(viewsets.ViewSet):
                 for m in all_mods:
                     req_q = ModuleQuestion.objects.filter(module=m, is_active=True, is_required=True)
                     tot_q = req_q.count()
-                    is_tested = (tot_q >= 5)
                     answered_q = ModuleQuestionResponse.objects.filter(question__in=req_q, learner=learner).count()
 
-                    att = ModuleAssessmentAttempt.objects.filter(module=m, learner=learner).order_by("-score").first()
-                    best_score = att.score if att else None
+                    # Query all attempts for this module & learner
+                    attempts_qs = ModuleAssessmentAttempt.objects.filter(module=m, learner=learner).order_by("-attempt_number")
+                    attempt_count = attempts_qs.count()
+                    best_att = attempts_qs.order_by("-score", "-attempt_number").first()
+                    latest_att = attempts_qs.first()
+
+                    # A module is an assessment module if it has assessment questions or attempts
+                    is_tested = (tot_q >= 5) or (attempt_count > 0) or ModuleQuestion.objects.filter(
+                        module=m, is_active=True, question_type="MULTIPLE_CHOICE"
+                    ).exists()
+
+                    best_score = best_att.score if best_att else None
+                    tot_possible = float(best_att.total_possible) if (best_att and best_att.total_possible is not None) else (float(tot_q) if tot_q > 0 else 5.0)
 
                     m_level_id = m.level_id
                     m_level_name = m.level.name if m.level else None
 
                     if is_tested:
-                        has_passed = (best_score is not None and best_score >= 3.0)
+                        # Existing LMS policy: 3/5 (60%) or percentage >= 60% is PASS
+                        passing_score = 3.0 if tot_possible == 5.0 else (0.6 * tot_possible)
+                        has_passed = (best_score is not None and best_score >= passing_score)
+                        latest_completed = bool(latest_att and latest_att.is_completed)
+
+                        pct_score = None
+                        if best_score is not None and tot_possible > 0:
+                            pct_score = round((best_score / tot_possible) * 100.0, 1)
+
                         if best_score is not None and has_passed:
                             res = "PASS"
                             mod_status = "COMPLETED"
                             comp_count += 1
-                        elif best_score is not None:
+                        elif best_score is not None and latest_completed:
                             res = "FAIL"
                             mod_status = "IN PROGRESS"
                             in_prog_count += 1
-                        elif answered_q > 0:
+                        elif answered_q > 0 or attempt_count > 0:
                             res = "IN PROGRESS"
                             mod_status = "IN PROGRESS"
                             in_prog_count += 1
@@ -5507,7 +5640,8 @@ class ReportsViewSet(viewsets.ViewSet):
                             mod_status = "NOT STARTED"
                             not_start_count += 1
 
-                        score_disp = f"{int(best_score)}/5" if best_score is not None else "—"
+                        score_disp = f"{int(best_score) if best_score.is_integer() else best_score}/{int(tot_possible) if tot_possible.is_integer() else tot_possible}" if best_score is not None else "—"
+                        last_attempt_time = latest_att.completed_at or latest_att.started_at if latest_att else None
 
                         ar_list.append({
                             "module_id": m.id,
@@ -5515,9 +5649,15 @@ class ReportsViewSet(viewsets.ViewSet):
                             "level_id": m_level_id,
                             "level_name": m_level_name,
                             "score_display": score_disp,
+                            "score": best_score,
+                            "total_possible": tot_possible,
+                            "percentage": pct_score,
                             "result": res,
-                            "completion_status": "Completed" if has_passed else "Not Completed",
+                            "attempts_count": attempt_count,
+                            "last_attempt_at": last_attempt_time,
+                            "completion_status": "Completed" if has_passed else ("In Progress" if (answered_q > 0 or attempt_count > 0) else "Not Completed"),
                             "is_completed": has_passed,
+                            "is_assessment": True,
                         })
                     else:
                         if tot_q > 0 and answered_q == tot_q:
@@ -5677,12 +5817,13 @@ class ReportsViewSet(viewsets.ViewSet):
             if r.question.module_id not in learner_allowed_mod_ids.get(r.learner_id, set()):
                 continue
 
-            # Check for scored assessment fields in response_payload
+            # Check for scored assessment fields in response_payload or linked attempt
             payload = r.response_payload if isinstance(r.response_payload, dict) else {}
             has_score = (
                 "score" in payload
                 or "marks_obtained" in payload
                 or "marks" in payload
+                or (r.attempt_id is not None)
             )
 
             marks_obtained = None
@@ -5691,11 +5832,16 @@ class ReportsViewSet(viewsets.ViewSet):
 
             if has_score:
                 try:
-                    marks_obtained = float(payload.get("marks_obtained", payload.get("score", payload.get("marks"))))
-                    tot = payload.get("total_marks", payload.get("max_score", payload.get("total")))
-                    if tot is not None:
-                        total_marks = float(tot)
-                        percentage = round((marks_obtained / total_marks) * 100.0, 1) if total_marks > 0 else 0.0
+                    if "marks_obtained" in payload or "score" in payload or "marks" in payload:
+                        marks_obtained = float(payload.get("marks_obtained", payload.get("score", payload.get("marks"))))
+                        tot = payload.get("total_marks", payload.get("max_score", payload.get("total")))
+                        if tot is not None:
+                            total_marks = float(tot)
+                            percentage = round((marks_obtained / total_marks) * 100.0, 1) if total_marks > 0 else 0.0
+                    elif r.attempt:
+                        marks_obtained = float(r.attempt.score)
+                        total_marks = float(r.attempt.total_possible or 5.0)
+                        percentage = float(r.attempt.percentage) if r.attempt.percentage is not None else (round((marks_obtained / total_marks) * 100.0, 1) if total_marks > 0 else 0.0)
                 except (ValueError, TypeError, ZeroDivisionError):
                     marks_obtained = None
                     total_marks = None

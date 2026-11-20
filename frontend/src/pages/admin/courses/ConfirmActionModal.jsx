@@ -35,7 +35,7 @@ export default function ConfirmActionModal({
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 1300,
+        zIndex: 20000,
         padding: "16px",
       }}
       onClick={(e) => {

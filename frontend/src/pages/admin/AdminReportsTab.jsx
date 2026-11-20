@@ -540,7 +540,7 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
                         </div>
 
                         {/* Breakdown Grid: Course Enrollment Status Breakdown & Assessment Results */}
-                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "16px" }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "16px" }}>
                           {/* Course Enrollment Status Breakdown (Individual) */}
                           <div style={{ background: "var(--bg-surface, #f8fafc)", padding: "14px 16px", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
                             <div style={{ fontSize: "12px", fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text-secondary)", marginBottom: "10px" }}>
@@ -576,60 +576,81 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
                             </table>
                           </div>
 
-                          {/* Assessment Results (Module 1 & Module 2) */}
-                          <div style={{ background: "var(--bg-surface, #f8fafc)", padding: "14px 16px", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
-                            <div style={{ fontSize: "12px", fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text-secondary)", marginBottom: "10px" }}>
-                              Assessment Results (Modules 1 &amp; 2)
+                          {/* Assessment Results — All Modules */}
+                          <div style={{ background: "var(--bg-surface, #f8fafc)", padding: "14px 16px", borderRadius: "6px", border: "1px solid var(--border-color)", overflow: "hidden" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px", flexWrap: "wrap", gap: "6px" }}>
+                              <div style={{ fontSize: "12px", fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text-secondary)" }}>
+                                Assessment Results — All Modules {lp.assessment_results && lp.assessment_results.length > 0 && `(${lp.assessment_results.length})`}
+                              </div>
+                              <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>
+                                Pass threshold: 60% (3/5)
+                              </span>
                             </div>
-                            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
-                              <thead>
-                                <tr style={{ borderBottom: "1px solid var(--border-color)", textAlign: "left" }}>
-                                  <th style={{ padding: "6px 0", color: "var(--text-secondary)", fontWeight: "600" }}>Module</th>
-                                  <th style={{ padding: "6px 0", color: "var(--text-secondary)", fontWeight: "600", textAlign: "center" }}>Score</th>
-                                  <th style={{ padding: "6px 0", color: "var(--text-secondary)", fontWeight: "600", textAlign: "center" }}>Result</th>
-                                  <th style={{ padding: "6px 0", color: "var(--text-secondary)", fontWeight: "600", textAlign: "right" }}>Status</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {(lp.assessment_results && lp.assessment_results.length > 0) ? (
-                                  lp.assessment_results.map((ar) => (
-                                    <tr key={ar.module_id} style={{ borderBottom: "1px solid rgba(0,0,0,0.04)" }}>
-                                      <td style={{ padding: "8px 0", fontWeight: "500", color: "var(--text-main)", maxWidth: "160px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={ar.module_name}>
-                                        {ar.module_name.split(" - ")[0]}
-                                      </td>
-                                      <td style={{ padding: "8px 0", textAlign: "center", fontFamily: "var(--font-mono)", color: "var(--text-main)" }}>
-                                        {ar.score_display}
-                                      </td>
-                                      <td style={{ padding: "8px 0", textAlign: "center" }}>
-                                        <span
-                                          className={`badge ${
-                                            ar.result === "PASS"
-                                              ? "badge-success"
-                                              : ar.result === "FAIL"
-                                              ? "badge-error"
-                                              : "badge-secondary"
-                                          }`}
-                                          style={{ fontSize: "10px", padding: "2px 6px" }}
-                                        >
-                                          {ar.result}
-                                        </span>
-                                      </td>
-                                      <td style={{ padding: "8px 0", textAlign: "right" }}>
-                                        <span style={{ fontSize: "12px", color: ar.is_completed ? "var(--status-success)" : "var(--text-secondary)", fontWeight: ar.is_completed ? "600" : "normal" }}>
-                                          {ar.completion_status}
-                                        </span>
+                            <div style={{ overflowX: "auto", maxHeight: "320px", overflowY: "auto" }}>
+                              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px" }}>
+                                <thead>
+                                  <tr style={{ borderBottom: "1px solid var(--border-color)", textAlign: "left", background: "var(--bg-surface, #f8fafc)", position: "sticky", top: 0, zIndex: 1 }}>
+                                    <th style={{ padding: "6px 8px", color: "var(--text-secondary)", fontWeight: "600" }}>Module</th>
+                                    <th style={{ padding: "6px 8px", color: "var(--text-secondary)", fontWeight: "600", textAlign: "center" }}>Score</th>
+                                    <th style={{ padding: "6px 8px", color: "var(--text-secondary)", fontWeight: "600", textAlign: "center" }}>Percentage</th>
+                                    <th style={{ padding: "6px 8px", color: "var(--text-secondary)", fontWeight: "600", textAlign: "center" }}>Result</th>
+                                    <th style={{ padding: "6px 8px", color: "var(--text-secondary)", fontWeight: "600", textAlign: "center" }}>Attempts</th>
+                                    <th style={{ padding: "6px 8px", color: "var(--text-secondary)", fontWeight: "600", textAlign: "center" }}>Status</th>
+                                    <th style={{ padding: "6px 8px", color: "var(--text-secondary)", fontWeight: "600", textAlign: "right" }}>Last Attempt</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {(lp.assessment_results && lp.assessment_results.length > 0) ? (
+                                    lp.assessment_results.map((ar) => (
+                                      <tr key={ar.module_id} style={{ borderBottom: "1px solid rgba(0,0,0,0.04)" }}>
+                                        <td style={{ padding: "8px", fontWeight: "500", color: "var(--text-main)", maxWidth: "180px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={ar.module_name}>
+                                          {ar.module_name}
+                                        </td>
+                                        <td style={{ padding: "8px", textAlign: "center", fontFamily: "var(--font-mono)", color: "var(--text-main)" }}>
+                                          {ar.score_display}
+                                        </td>
+                                        <td style={{ padding: "8px", textAlign: "center", fontFamily: "var(--font-mono)", color: "var(--text-main)" }}>
+                                          {ar.percentage !== null && ar.percentage !== undefined ? `${ar.percentage}%` : "—"}
+                                        </td>
+                                        <td style={{ padding: "8px", textAlign: "center" }}>
+                                          <span
+                                            className={`badge ${
+                                              ar.result === "PASS"
+                                                ? "badge-success"
+                                                : ar.result === "FAIL"
+                                                ? "badge-error"
+                                                : ar.result === "IN PROGRESS"
+                                                ? "badge-info"
+                                                : "badge-secondary"
+                                            }`}
+                                            style={{ fontSize: "10px", padding: "2px 6px" }}
+                                          >
+                                            {ar.result}
+                                          </span>
+                                        </td>
+                                        <td style={{ padding: "8px", textAlign: "center", fontFamily: "var(--font-mono)", color: "var(--text-secondary)" }}>
+                                          {ar.attempts_count > 0 ? ar.attempts_count : 0}
+                                        </td>
+                                        <td style={{ padding: "8px", textAlign: "center" }}>
+                                          <span style={{ fontSize: "11px", color: ar.is_completed ? "var(--status-success)" : "var(--text-secondary)", fontWeight: ar.is_completed ? "600" : "normal" }}>
+                                            {ar.completion_status}
+                                          </span>
+                                        </td>
+                                        <td style={{ padding: "8px", textAlign: "right", fontSize: "11px", color: "var(--text-muted)", whiteSpace: "nowrap" }}>
+                                          {ar.last_attempt_at ? formatDate(ar.last_attempt_at) : "—"}
+                                        </td>
+                                      </tr>
+                                    ))
+                                  ) : (
+                                    <tr>
+                                      <td colSpan={7} style={{ padding: "12px 0", textAlign: "center", color: "var(--text-muted)", fontSize: "12px" }}>
+                                        No assessment modules configured for this course.
                                       </td>
                                     </tr>
-                                  ))
-                                ) : (
-                                  <tr>
-                                    <td colSpan={4} style={{ padding: "12px 0", textAlign: "center", color: "var(--text-muted)", fontSize: "12px" }}>
-                                      No assessment modules configured for this course.
-                                    </td>
-                                  </tr>
-                                )}
-                              </tbody>
-                            </table>
+                                  )}
+                                </tbody>
+                              </table>
+                            </div>
                           </div>
                         </div>
 

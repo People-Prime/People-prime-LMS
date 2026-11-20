@@ -796,13 +796,23 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
   };
 
   const handleInsertModule = (insertData) => {
-    const targetLvl = courseLevels.find((lvl) => String(lvl.id) === String(insertData.level));
+    const targetLvl = courseLevels.find((lvl) => String(lvl.id) === String(insertData.level || insertData.level_id));
+    const isBulk = Array.isArray(insertData.items) && insertData.items.length > 0;
+    const count = isBulk ? insertData.items.length : 1;
+    const titleText = isBulk ? `Confirm Bulk Module Insertion (${count} Modules)` : "Confirm Insert Module";
+    const msgText = isBulk
+      ? `Are you sure you want to insert ${count} modules into ${targetLvl?.name || "Level"} at position (${insertData.position})? Existing modules will be re-sequenced automatically.`
+      : `Are you sure you want to insert "${insertData.name}" into ${targetLvl?.name || "Level"} at position (${insertData.position})? Existing modules will be re-sequenced automatically.`;
+    const itemText = isBulk
+      ? `${count} Modules → ${targetLvl?.name || "Level"}`
+      : `${insertData.name} → ${targetLvl?.name || "Level"}`;
+
     setConfirmConfig({
       show: true,
-      title: "Confirm Insert Module",
-      message: `Are you sure you want to insert "${insertData.name}" into ${targetLvl?.name || "Level"} at position (${insertData.position})? Existing modules will be re-sequenced automatically.`,
-      affectedItem: `${insertData.name} → ${targetLvl?.name || "Level"}`,
-      confirmLabel: "Insert Module",
+      title: titleText,
+      message: msgText,
+      affectedItem: itemText,
+      confirmLabel: isBulk ? `Insert ${count} Modules` : "Insert Module",
       cancelLabel: "Cancel",
       isDanger: false,
       onConfirm: async () => {
@@ -813,12 +823,16 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
             method: "POST",
             body: insertData,
           });
-          setSuccessMessage(`Module "${res?.name || insertData.name}" inserted successfully at position ${res?.order || ""}.`);
+          if (isBulk || res?.created_count) {
+            setSuccessMessage(`Successfully created and inserted ${res?.created_count || count} module(s) into ${targetLvl?.name || "Level"}.`);
+          } else {
+            setSuccessMessage(`Module "${res?.name || insertData.name}" inserted successfully at position ${res?.order || ""}.`);
+          }
           setShowInsertModuleModal(false);
           setConfirmConfig((prev) => ({ ...prev, show: false }));
           await loadData();
         } catch (err) {
-          setError(err.message || "Failed to insert module.");
+          setError(err.message || "Failed to insert module(s).");
           setConfirmConfig((prev) => ({ ...prev, show: false }));
         } finally {
           setSubmitting(false);
