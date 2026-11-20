@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback } from "react";
-import { apiClient } from "../../services/api";
+ import { useEffect, useState, useCallback } from "react";
+import { apiClient, getCsrfToken } from "../../services/api";
 
 // Subcomponents under courses/
 import CourseCatalogView from "./courses/CourseCatalogView";
