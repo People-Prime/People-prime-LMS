@@ -15,7 +15,7 @@ from pathlib import Path
 from django.conf import settings
 from django.core.exceptions import SuspiciousOperation, ValidationError
 from django.db import transaction, IntegrityError
-from django.db.models import Q
+from django.db.models import Q, Max, Count, Avg
 from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
 from django.utils.text import slugify
@@ -6082,6 +6082,646 @@ class ReportsViewSet(viewsets.ViewSet):
 
         serializer = ReportCourseProgressItemSerializer(items, many=True)
         return Response(serializer.data)
+
+    def _get_latest_assessment_attempts_for_scope(self, learners_qs, accessible_module_ids):
+        """
+        Efficiently bulk-fetches and indexes the LATEST assessment attempt for each
+        (learner_id, module_id) pair across all scoped learners and modules.
+        Resolves passing criteria based on latest attempt:
+        - Passing score: 3.0 / 5.0 (60%) or 0.6 * total_possible
+        Returns a dict:
+            (learner_id, module_id) -> {
+                'attempt': ModuleAssessmentAttempt,
+                'score': float or None,
+                'total_possible': float,
+                'percentage': float or None,
+                'is_pass': bool,
+                'is_completed': bool,
+                'attempt_number': int,
+                'date': datetime,
+            }
+        """
+        all_attempts = ModuleAssessmentAttempt.objects.filter(
+            learner__in=learners_qs,
+            module_id__in=accessible_module_ids,
+        ).order_by("attempt_number", "completed_at", "started_at", "id")
+
+        latest_map = {}
+        for att in all_attempts:
+            lid = att.learner_id
+            mid = att.module_id
+            tot = float(att.total_possible) if att.total_possible is not None else 5.0
+            passing_score = 3.0 if tot == 5.0 else (0.6 * tot)
+            sc = att.score
+            is_pass = (sc is not None and sc >= passing_score)
+            pct = round((sc / tot * 100.0), 1) if (sc is not None and tot > 0) else None
+            dt = att.completed_at or att.started_at
+
+            latest_map[(lid, mid)] = {
+                "attempt": att,
+                "score": sc,
+                "total_possible": tot,
+                "percentage": pct,
+                "is_pass": is_pass,
+                "is_completed": bool(att.is_completed),
+                "attempt_number": att.attempt_number or 1,
+                "date": dt,
+            }
+
+        return latest_map
+
+    @action(detail=False, methods=["get"], url_path="summary-kpis")
+    def summary_kpis(self, request):
+        """
+        Scalable organization/team-level KPI analytics for Admin and Trainer Reports.
+        Rigorous metric separation:
+        - Learner-Level Metrics: unique learners (Total Learners, Completed Learners, Active Learners,
+          Not Started Learners, Learners Needing Attention). No double counting across multiple courses.
+        - Enrollment-Level Metrics: unique (learner, course/level) enrollment units (Total Enrollments,
+          Completed Enrollments, In Progress Enrollments, Not Started Enrollments, Average Course Progress).
+        - Assessment Metrics: strictly evaluated on LATEST attempt per unique (learner, module) to prevent
+          skewing from retakes.
+        - Attention Criteria:
+          • Assessment-failed: learner's LATEST attempt on any module is failed.
+          • Low-progress: an enrollment is IN_PROGRESS and progress < 25%.
+          • Completed enrollments and NOT_STARTED (0%) enrollments do NOT trigger attention solely for low progress.
+        """
+        user = request.user
+        learners_qs, accessible_modules_qs, accessible_course_ids = (
+            self._get_accessible_learners_and_curriculum(user)
+        )
+
+        total_learners = learners_qs.count()
+        accessible_module_ids = set(accessible_modules_qs.values_list("id", flat=True))
+
+        # Bulk fetch latest attempts for all scoped learners and modules
+        latest_attempts_map = self._get_latest_assessment_attempts_for_scope(learners_qs, accessible_module_ids)
+
+        total_enrollments = 0
+        completed_enrollments = 0
+        in_progress_enrollments = 0
+        not_started_enrollments = 0
+        total_pct_sum = 0.0
+
+        # Learner-level accounting: learner_id -> {completed: int, in_progress: int, not_started: int, has_low_progress_in_progress: bool, has_failed_latest_assessment: bool}
+        learner_metrics = {}
+        course_distribution = defaultdict(lambda: {"name": "", "total": 0, "completed": 0, "in_progress": 0, "not_started": 0, "pct_sum": 0.0})
+
+        for learner in learners_qs:
+            l_mods = list(self._get_scoped_learner_modules(learner, accessible_module_ids))
+            enrollments = self._group_learner_modules_into_enrollments(l_mods)
+
+            l_entry = learner_metrics.setdefault(learner.id, {
+                "completed": 0,
+                "in_progress": 0,
+                "not_started": 0,
+                "has_low_progress_in_progress": False,
+                "has_failed_latest_assessment": False,
+            })
+
+            # Check if any latest attempt by this learner across all modules failed
+            for mid in accessible_module_ids:
+                att_info = latest_attempts_map.get((learner.id, mid))
+                if att_info and not att_info["is_pass"]:
+                    l_entry["has_failed_latest_assessment"] = True
+
+            for enr in enrollments:
+                all_mods = enr["modules"]
+                if not all_mods:
+                    continue
+
+                total_enrollments += 1
+                c_status, pct, tot_m, comp_m = self._get_modules_completion_status_for_learner(learner, all_mods)
+                total_pct_sum += pct
+
+                course_obj = enr["course"]
+                level_obj = enr["level"]
+                c_key = f"c_{course_obj.id}" if course_obj else f"l_{level_obj.id if level_obj else 'other'}"
+                c_name = course_obj.name if course_obj else (level_obj.name if level_obj else "Level 1")
+
+                cd = course_distribution[c_key]
+                cd["name"] = c_name
+                cd["total"] += 1
+                cd["pct_sum"] += pct
+
+                if c_status == "COMPLETED":
+                    completed_enrollments += 1
+                    l_entry["completed"] += 1
+                    cd["completed"] += 1
+                elif c_status == "IN_PROGRESS":
+                    in_progress_enrollments += 1
+                    l_entry["in_progress"] += 1
+                    cd["in_progress"] += 1
+                    # Progress-related attention: only if IN_PROGRESS and progress < 25%
+                    if pct < 25.0:
+                        l_entry["has_low_progress_in_progress"] = True
+                else:
+                    not_started_enrollments += 1
+                    l_entry["not_started"] += 1
+                    cd["not_started"] += 1
+
+        # Classify Unique Learners Reconciled (No double-counting, sum == total_learners)
+        completed_learners_count = 0
+        active_learners_count = 0
+        not_started_learners_count = 0
+        needing_attention_learners_count = 0
+
+        for lid, info in learner_metrics.items():
+            tot_enrs = info["completed"] + info["in_progress"] + info["not_started"]
+            if tot_enrs > 0 and info["completed"] == tot_enrs:
+                completed_learners_count += 1
+            elif info["in_progress"] > 0 or info["completed"] > 0:
+                active_learners_count += 1
+            else:
+                not_started_learners_count += 1
+
+            # Attention: latest assessment failed OR (in-progress enrollment with progress < 25%)
+            if info["has_failed_latest_assessment"] or info["has_low_progress_in_progress"]:
+                needing_attention_learners_count += 1
+
+        # Aggregate Latest Assessment Score & Pass Rate across unique (learner, module)
+        scored_latest_attempts = [
+            info for info in latest_attempts_map.values()
+            if info["score"] is not None and info["total_possible"] > 0
+        ]
+        total_unique_assessments = len(scored_latest_attempts)
+        passed_unique_assessments = sum(1 for info in scored_latest_attempts if info["is_pass"])
+        failed_unique_assessments = total_unique_assessments - passed_unique_assessments
+
+        if total_unique_assessments > 0:
+            avg_score_pct = round(
+                sum(info["percentage"] for info in scored_latest_attempts) / total_unique_assessments, 1
+            )
+            pass_rate_pct = round((passed_unique_assessments / total_unique_assessments) * 100.0, 1)
+        else:
+            avg_score_pct = None
+            pass_rate_pct = None
+
+        avg_course_progress = round(total_pct_sum / total_enrollments, 1) if total_enrollments > 0 else 0.0
+
+        courses_summary_list = []
+        for c_key, c_data in course_distribution.items():
+            tot = c_data["total"]
+            courses_summary_list.append({
+                "key": c_key,
+                "name": c_data["name"],
+                "total_enrollments": tot,
+                "completed": c_data["completed"],
+                "in_progress": c_data["in_progress"],
+                "not_started": c_data["not_started"],
+                "average_progress": round(c_data["pct_sum"] / tot, 1) if tot > 0 else 0.0,
+            })
+
+        return Response({
+            # Learner-level KPIs (Unique Learners)
+            "total_learners": total_learners,
+            "completed_learners": completed_learners_count,
+            "active_learners": active_learners_count,
+            "not_started_learners": not_started_learners_count,
+            "needing_attention_learners": needing_attention_learners_count,
+            # Enrollment-level KPIs
+            "total_enrollments": total_enrollments,
+            "completed_enrollments": completed_enrollments,
+            "in_progress_enrollments": in_progress_enrollments,
+            "not_started_enrollments": not_started_enrollments,
+            "average_course_progress": avg_course_progress,
+            # Assessment Analytics (Evaluated on Latest Unique Attempt)
+            "average_assessment_score_pct": avg_score_pct,
+            "pass_rate_pct": pass_rate_pct,
+            "assessment_stats": {
+                "unique_assessed_modules": total_unique_assessments,
+                "passed": passed_unique_assessments,
+                "failed": failed_unique_assessments,
+                "pass_rate_pct": pass_rate_pct,
+            },
+            "course_distributions": courses_summary_list,
+        })
+
+    @action(detail=False, methods=["get"], url_path="learner-enrollments-table")
+    def learner_enrollments_table(self, request):
+        """
+        Searchable, filterable, paginated learner-course enrollment table for Admin & Trainer Reports.
+        Optimized query architecture:
+        - Bulk-fetches active group memberships and trainer assignments in 2 queries (no N+1).
+        - Bulk-fetches latest assessment attempts for all modules in scope in 1 query.
+        - Bulk-fetches last activity timestamps via database aggregation.
+        - Assessment status per enrollment is aggregated from the LATEST attempt of each tested module:
+          • PASS: all applicable tested modules have their latest attempt passed.
+          • FAIL: at least one applicable tested module has its latest attempt failed.
+          • IN_PROGRESS: tested modules have attempts, but not all are finished/passed.
+          • NOT_STARTED: no assessment attempts exist for the enrollment.
+        - Respects role scope (Trainer strictly scoped to assigned groups/learners).
+        - Supports pagination (10, 25, 50, 100).
+        """
+        user = request.user
+        learners_qs, accessible_modules_qs, accessible_course_ids = (
+            self._get_accessible_learners_and_curriculum(user)
+        )
+
+        # Filters
+        search_q = request.query_params.get("search", "").strip()
+        course_filter = request.query_params.get("course", "ALL").strip()
+        level_filter = request.query_params.get("level", "ALL").strip()
+        trainer_filter = request.query_params.get("trainer", "ALL").strip()
+        group_filter = request.query_params.get("group", "ALL").strip()
+        enrollment_status_filter = request.query_params.get("enrollment_status", "ALL").strip()
+        progress_status_filter = request.query_params.get("progress_status", "ALL").strip()
+        assessment_status_filter = request.query_params.get("assessment_status", "ALL").strip()
+
+        # Pagination
+        try:
+            page = max(1, int(request.query_params.get("page", 1)))
+        except (ValueError, TypeError):
+            page = 1
+        try:
+            page_size = min(100, max(1, int(request.query_params.get("page_size", 10))))
+        except (ValueError, TypeError):
+            page_size = 10
+
+        # Apply database-level filters early
+        if search_q:
+            learners_qs = learners_qs.filter(
+                Q(first_name__icontains=search_q)
+                | Q(last_name__icontains=search_q)
+                | Q(email__icontains=search_q)
+                | Q(username__icontains=search_q)
+            )
+
+        if group_filter and group_filter != "ALL":
+            learners_qs = learners_qs.filter(
+                group_memberships__group_id=group_filter,
+                group_memberships__is_active=True,
+            )
+
+        if trainer_filter and trainer_filter != "ALL" and _get_role(user) == User.Role.ADMIN:
+            trainer_cohorts = LearnerGroup.objects.filter(
+                trainer_assignments__trainer_id=trainer_filter,
+                trainer_assignments__is_active=True,
+                is_active=True,
+            )
+            learners_qs = learners_qs.filter(
+                group_memberships__group__in=trainer_cohorts,
+                group_memberships__is_active=True,
+            )
+
+        learners_qs = learners_qs.distinct()
+        accessible_module_ids = set(accessible_modules_qs.values_list("id", flat=True))
+
+        # 1. Bulk-fetch trainer/group information (Eliminates N+1)
+        learner_groups_map = defaultdict(list)
+        learner_trainers_map = defaultdict(set)
+        active_memberships = GroupMembership.objects.filter(
+            learner__in=learners_qs,
+            is_active=True,
+            group__is_active=True,
+        ).select_related("group")
+
+        group_ids = [m.group_id for m in active_memberships]
+        trainer_assigns = TrainerGroupAssignment.objects.filter(
+            group_id__in=group_ids,
+            is_active=True,
+        ).select_related("trainer", "group")
+
+        group_trainer_names = defaultdict(list)
+        for ta in trainer_assigns:
+            t_name = ta.trainer.get_full_name().strip() or ta.trainer.username
+            group_trainer_names[ta.group_id].append(t_name)
+
+        for m in active_memberships:
+            learner_groups_map[m.learner_id].append(m.group.name)
+            for tname in group_trainer_names.get(m.group_id, []):
+                learner_trainers_map[m.learner_id].add(tname)
+
+        # 2. Bulk-fetch latest assessment attempts for all scoped learners and modules (Eliminates N+1)
+        latest_attempts_map = self._get_latest_assessment_attempts_for_scope(learners_qs, accessible_module_ids)
+
+        # 3. Bulk-fetch last activity timestamps via database aggregation
+        last_resp_map = {
+            r["learner_id"]: r["max_sub"]
+            for r in ModuleQuestionResponse.objects.filter(learner__in=learners_qs)
+            .values("learner_id")
+            .annotate(max_sub=Max("submitted_at"))
+        }
+        last_att_map = {
+            a["learner_id"]: max(filter(None, [a["max_comp"], a["max_start"]]), default=None)
+            for a in ModuleAssessmentAttempt.objects.filter(learner__in=learners_qs)
+            .values("learner_id")
+            .annotate(max_comp=Max("completed_at"), max_start=Max("started_at"))
+        }
+
+        # Build enrollment rows
+        all_rows = []
+
+        for learner in learners_qs:
+            learner_mods = list(self._get_scoped_learner_modules(learner, accessible_module_ids))
+            enrollments = self._group_learner_modules_into_enrollments(learner_mods)
+
+            # Last activity
+            t_resp = last_resp_map.get(learner.id)
+            t_att = last_att_map.get(learner.id)
+            last_activity = max(filter(None, [t_resp, t_att]), default=None)
+
+            groups = learner_groups_map.get(learner.id, [])
+            trainers = sorted(list(learner_trainers_map.get(learner.id, [])))
+
+            for enr in enrollments:
+                all_mods = enr["modules"]
+                tot_req = len(all_mods)
+                if tot_req == 0:
+                    continue
+
+                course_obj = enr["course"]
+                level_obj = enr["level"]
+                enr_course_id = course_obj.id if course_obj else None
+                enr_level_id = level_obj.id if level_obj else None
+                enr_course_name = course_obj.name if course_obj else (level_obj.name if level_obj else "Level 1")
+                enr_level_name = level_obj.name if level_obj else (course_obj.name if course_obj else "Level 1")
+
+                # Filter by course
+                if course_filter != "ALL":
+                    if str(course_filter).startswith("level:"):
+                        target_lvl = str(course_filter)[6:]
+                        if str(enr_level_id) != target_lvl and str(enr_level_name) != target_lvl:
+                            continue
+                    elif str(enr_course_id) != str(course_filter):
+                        continue
+
+                # Filter by level
+                if level_filter != "ALL":
+                    if str(enr_level_id) != str(level_filter) and str(enr_level_name) != str(level_filter):
+                        continue
+
+                c_status, pct, _, comp_count = self._get_modules_completion_status_for_learner(learner, all_mods)
+
+                # Filter by enrollment_status
+                if enrollment_status_filter != "ALL" and c_status != enrollment_status_filter:
+                    continue
+
+                # Filter by progress_status
+                if progress_status_filter == "COMPLETED" and pct < 100.0:
+                    continue
+                elif progress_status_filter == "IN_PROGRESS" and (pct <= 0.0 or pct >= 100.0):
+                    continue
+                elif progress_status_filter == "NOT_STARTED" and pct > 0.0:
+                    continue
+
+                # Aggregated Assessment Status based on LATEST attempt for each tested module
+                latest_scores = []
+                has_any_failed_latest = False
+                tested_module_count = 0
+                passed_module_count = 0
+
+                for m in all_mods:
+                    att_info = latest_attempts_map.get((learner.id, m.id))
+                    if att_info:
+                        tested_module_count += 1
+                        if att_info["percentage"] is not None:
+                            latest_scores.append(att_info["percentage"])
+                        if att_info["is_pass"]:
+                            passed_module_count += 1
+                        else:
+                            has_any_failed_latest = True
+
+                if tested_module_count == 0:
+                    ass_status = "NOT_STARTED"
+                elif has_any_failed_latest:
+                    ass_status = "FAIL"
+                elif passed_module_count == tested_module_count and passed_module_count > 0:
+                    ass_status = "PASS"
+                else:
+                    ass_status = "IN_PROGRESS"
+
+                if assessment_status_filter != "ALL" and ass_status != assessment_status_filter:
+                    continue
+
+                avg_assessment_pct = (
+                    round(sum(latest_scores) / len(latest_scores), 1)
+                    if latest_scores
+                    else None
+                )
+
+                learner_full_name = learner.get_full_name().strip() or learner.username
+
+                all_rows.append({
+                    "learner_id": learner.id,
+                    "learner_name": learner_full_name,
+                    "learner_username": learner.username,
+                    "email": learner.email or "",
+                    "course_id": enr_course_id,
+                    "course_name": enr_course_name,
+                    "level_id": enr_level_id,
+                    "level_name": enr_level_name,
+                    "groups": groups,
+                    "group_name": ", ".join(groups) if groups else "—",
+                    "trainers": trainers,
+                    "trainer_names": ", ".join(trainers) if trainers else "—",
+                    "overall_progress_percentage": pct,
+                    "completed_modules": comp_count,
+                    "total_required_modules": tot_req,
+                    "assessment_average_pct": avg_assessment_pct,
+                    "assessment_status": ass_status,
+                    "enrollment_status": c_status,
+                    "last_activity": last_activity,
+                })
+
+        total_matching_rows = len(all_rows)
+
+        # Slice pagination
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated_rows = all_rows[start_idx:end_idx]
+
+        return Response({
+            "total_count": total_matching_rows,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": max(1, (total_matching_rows + page_size - 1) // page_size),
+            "results": paginated_rows,
+        })
+
+    @action(detail=False, methods=["get"], url_path="learner-detail")
+    def learner_detail(self, request):
+        """
+        On-demand detailed report for an authorized single learner and optional course/level:
+        - Distinguishes:
+          • Latest Attempt Score
+          • Best Score
+          • Attempt Count
+          • Latest Attempt Date
+          • Current Assessment Result (strictly based on Latest Attempt)
+        - Historical attempts are fully preserved.
+        - Scoped strictly by role permissions (Trainer cannot access unauthorized learners).
+        """
+        user = request.user
+        learners_qs, accessible_modules_qs, _ = self._get_accessible_learners_and_curriculum(user)
+
+        learner_id = request.query_params.get("learner_id")
+        if not learner_id:
+            return Response({"error": "learner_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            learner = learners_qs.get(id=learner_id)
+        except (User.DoesNotExist, ValueError):
+            return Response({"error": "Learner not found or unauthorized."}, status=status.HTTP_404_NOT_FOUND)
+
+        course_id = request.query_params.get("course_id")
+        level_id = request.query_params.get("level_id")
+
+        accessible_module_ids = set(accessible_modules_qs.values_list("id", flat=True))
+        learner_mods = list(self._get_scoped_learner_modules(learner, accessible_module_ids))
+        enrollments = self._group_learner_modules_into_enrollments(learner_mods)
+
+        # Filter enrollments if course_id or level_id specified
+        if course_id:
+            enrollments = [enr for enr in enrollments if enr["course"] and str(enr["course"].id) == str(course_id)]
+        elif level_id:
+            enrollments = [enr for enr in enrollments if enr["level"] and str(enr["level"].id) == str(level_id)]
+
+        detail_enrollments = []
+        for enr in enrollments:
+            all_mods = enr["modules"]
+            total_req_modules = len(all_mods)
+            if total_req_modules == 0:
+                continue
+
+            c_status, pct, _, _ = self._get_modules_completion_status_for_learner(learner, all_mods)
+            comp_count = 0
+            in_prog_count = 0
+            not_start_count = 0
+            modules_prog_list = []
+            ar_list = []
+
+            for m in all_mods:
+                req_q = ModuleQuestion.objects.filter(module=m, is_active=True, is_required=True)
+                tot_q = req_q.count()
+                answered_q = ModuleQuestionResponse.objects.filter(question__in=req_q, learner=learner).count()
+
+                attempts_qs = ModuleAssessmentAttempt.objects.filter(module=m, learner=learner).order_by("-attempt_number", "-id")
+                attempt_count = attempts_qs.count()
+                best_att = attempts_qs.order_by("-score", "-attempt_number").first()
+                latest_att = attempts_qs.first()
+
+                is_tested = (tot_q >= 5) or (attempt_count > 0) or ModuleQuestion.objects.filter(
+                    module=m, is_active=True, question_type="MULTIPLE_CHOICE"
+                ).exists()
+
+                best_score = best_att.score if best_att else None
+                latest_score = latest_att.score if latest_att else None
+                tot_possible = (
+                    float(latest_att.total_possible)
+                    if (latest_att and latest_att.total_possible is not None)
+                    else (float(tot_q) if tot_q > 0 else 5.0)
+                )
+
+                m_level_id = m.level_id
+                m_level_name = m.level.name if m.level else None
+
+                if is_tested:
+                    passing_score = 3.0 if tot_possible == 5.0 else (0.6 * tot_possible)
+                    # Current Assessment Result is determined by the LATEST attempt
+                    latest_passed = (latest_score is not None and latest_score >= passing_score)
+                    latest_completed = bool(latest_att and latest_att.is_completed)
+
+                    pct_score = None
+                    if latest_score is not None and tot_possible > 0:
+                        pct_score = round((latest_score / tot_possible) * 100.0, 1)
+
+                    if latest_score is not None and latest_passed:
+                        res = "PASS"
+                        mod_status = "COMPLETED"
+                        comp_count += 1
+                    elif latest_score is not None and latest_completed:
+                        res = "FAIL"
+                        mod_status = "IN PROGRESS"
+                        in_prog_count += 1
+                    elif answered_q > 0 or attempt_count > 0:
+                        res = "IN PROGRESS"
+                        mod_status = "IN PROGRESS"
+                        in_prog_count += 1
+                    else:
+                        res = "NOT STARTED"
+                        mod_status = "NOT STARTED"
+                        not_start_count += 1
+
+                    score_disp = f"{int(latest_score) if latest_score.is_integer() else latest_score}/{int(tot_possible) if tot_possible.is_integer() else tot_possible}" if latest_score is not None else "—"
+                    best_score_disp = f"{int(best_score) if best_score.is_integer() else best_score}/{int(tot_possible) if tot_possible.is_integer() else tot_possible}" if best_score is not None else "—"
+                    last_attempt_time = latest_att.completed_at or latest_att.started_at if latest_att else None
+
+                    ar_list.append({
+                        "module_id": m.id,
+                        "module_name": m.name,
+                        "level_id": m_level_id,
+                        "level_name": m_level_name,
+                        "score_display": score_disp,
+                        "score": latest_score,
+                        "best_score": best_score,
+                        "best_score_display": best_score_disp,
+                        "total_possible": tot_possible,
+                        "percentage": pct_score,
+                        "result": res,
+                        "attempts_count": attempt_count,
+                        "last_attempt_at": last_attempt_time,
+                        "completion_status": "Completed" if latest_passed else ("In Progress" if (answered_q > 0 or attempt_count > 0) else "Not Completed"),
+                        "is_completed": latest_passed,
+                        "is_assessment": True,
+                    })
+                else:
+                    if tot_q > 0 and answered_q == tot_q:
+                        mod_status = "COMPLETED"
+                        comp_count += 1
+                    elif answered_q > 0:
+                        mod_status = "IN PROGRESS"
+                        in_prog_count += 1
+                    else:
+                        mod_status = "NOT STARTED"
+                        not_start_count += 1
+                    res = "—"
+                    score_disp = "—"
+
+                modules_prog_list.append({
+                    "module_id": m.id,
+                    "module_name": m.name,
+                    "level_id": m_level_id,
+                    "level_name": m_level_name,
+                    "is_tested_module": is_tested,
+                    "total_required_questions": tot_q,
+                    "answered_required_questions": answered_q,
+                    "score_display": score_disp,
+                    "result": res,
+                    "status": mod_status,
+                })
+
+            progress_pct = round((comp_count / total_req_modules) * 100.0, 1)
+            course_obj = enr["course"]
+            level_obj = enr["level"]
+            enr_level_id = level_obj.id if level_obj else None
+            enr_level_name = level_obj.name if level_obj else None
+            enr_course_id = course_obj.id if course_obj else None
+            enr_course_name = course_obj.name if course_obj else enr_level_name
+
+            detail_enrollments.append({
+                "course_id": enr_course_id,
+                "course_name": enr_course_name,
+                "level_id": enr_level_id,
+                "level_name": enr_level_name,
+                "enrollment_status": c_status,
+                "overall_progress_percentage": progress_pct,
+                "total_required_modules": total_req_modules,
+                "completed_modules": comp_count,
+                "in_progress_modules": in_prog_count,
+                "not_started_modules": not_start_count,
+                "assessment_results": ar_list,
+                "modules_progress": modules_prog_list,
+            })
+
+        learner_name = learner.get_full_name().strip() or learner.username
+        return Response({
+            "learner_id": learner.id,
+            "learner_name": learner_name,
+            "learner_username": learner.username,
+            "learner_email": learner.email or "",
+            "enrollments": detail_enrollments,
+        })
 
 
 # =============================================================================
