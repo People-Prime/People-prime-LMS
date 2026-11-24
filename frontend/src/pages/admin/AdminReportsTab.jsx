@@ -700,7 +700,7 @@ export default function ReportsView({ portalRole = "ADMIN" }) {
                       Latest Assessment Results Distribution
                     </h3>
                     <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
-                      Pass threshold: 60% (3/5)
+                      Pass threshold: Dynamic 50%
                     </span>
                   </div>
 

@@ -1,5 +1,9 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { apiClient } from "../../services/api";
+import BatchUploadReportModal from "../../components/common/BatchUploadReportModal";
+import { isOSMetadataFile } from "./courses/MaterialRepositoryView";
+
+const UPLOAD_HISTORY_KEY = "lms_admin_upload_batches";
 
 const CATEGORY_LABELS = {
   PRIMARY_INSTRUCTIONAL: "Primary Instructional",
@@ -58,6 +62,50 @@ export default function AdminFilesTab() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadStatusText, setUploadStatusText] = useState("");
   const [uploadResults, setUploadResults] = useState(null);
+  const [showReportModal, setShowReportModal] = useState(false);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [uploadHistory, setUploadHistory] = useState([]);
+
+  // Load persistent upload history
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(UPLOAD_HISTORY_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) setUploadHistory(parsed.slice(0, 10));
+      }
+    } catch {
+      // Ignore localStorage errors
+    }
+  }, []);
+
+  const saveBatchToHistory = (batchRecord) => {
+    try {
+      const cleanRecord = {
+        ...batchRecord,
+        isHistorical: true,
+        items: (batchRecord.items || []).map((it) => {
+          const { fileObject, ...rest } = it;
+          return rest;
+        }),
+      };
+      try {
+        const stored = localStorage.getItem(UPLOAD_HISTORY_KEY);
+        const parsed = stored ? JSON.parse(stored) : [];
+        const existingList = Array.isArray(parsed) ? parsed : [];
+        const updatedStorage = [cleanRecord, ...existingList.filter((b) => b.batchId !== cleanRecord.batchId)].slice(0, 10);
+        localStorage.setItem(UPLOAD_HISTORY_KEY, JSON.stringify(updatedStorage));
+      } catch {
+        // Ignore localStorage quota/serialization errors
+      }
+
+      setUploadHistory((prev) => {
+        return [cleanRecord, ...prev.filter((b) => b.batchId !== cleanRecord.batchId)].slice(0, 10);
+      });
+    } catch {
+      // Ignore quota or serializing errors
+    }
+  };
 
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
@@ -177,28 +225,72 @@ export default function AdminFilesTab() {
     }
   };
 
-  // Process uploads in batches
-  const processUploadFiles = async (fileList) => {
+  // Process uploads in batches with per-file tracking and retry
+  const processUploadFiles = async (fileList, existingBatch = null) => {
     if (!fileList || fileList.length === 0) return;
 
     setIsUploading(true);
     setUploadProgress(0);
     setError(null);
     setSuccessMessage("");
-    setUploadResults(null);
 
-    const totalFiles = fileList.length;
-    let uploadedCount = 0;
-    let skippedCount = 0;
-    let failedCount = 0;
-    const allCreated = [];
-    const allSkipped = [];
-    const allFailed = [];
+    const batchId = existingBatch?.batchId || "BATCH-" + Date.now().toString(36).toUpperCase();
+    const timestamp = existingBatch?.timestamp || new Date().toISOString();
+    const totalFiles = existingBatch ? existingBatch.totalFiles : fileList.length;
+
+    // 1. Separate legitimate training files from operating-system metadata files
+    const legitimateFiles = [];
+    const osMetadataItems = [];
+
+    if (existingBatch) {
+      legitimateFiles.push(...fileList);
+    } else {
+      fileList.forEach((f, idx) => {
+        const clientRelPath = (f.webkitRelativePath || f.name).replace(/\\/g, "/");
+        if (isOSMetadataFile(f)) {
+          osMetadataItems.push({
+            client_id: `meta_${Date.now()}_${idx}`,
+            fileObject: null,
+            filename: f.name,
+            original_filename: f.name,
+            relative_path: clientRelPath,
+            file_size: f.size,
+            status: "IGNORED",
+            reason: "Operating-system metadata file automatically excluded.",
+            category: "OS_METADATA",
+            retry_count: 0,
+          });
+        } else {
+          legitimateFiles.push(f);
+        }
+      });
+    }
+
+    const trackedItems = existingBatch
+      ? [...existingBatch.items]
+      : [
+          ...legitimateFiles.map((f, idx) => {
+            const clientRelPath = (f.webkitRelativePath || f.name).replace(/\\/g, "/");
+            return {
+              client_id: `file_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 7)}`,
+              idx,
+              fileObject: f,
+              filename: f.name,
+              original_filename: f.name,
+              relative_path: clientRelPath,
+              file_size: f.size,
+              status: "PENDING",
+              retry_count: 0,
+            };
+          }),
+          ...osMetadataItems,
+        ];
 
     const BATCH_SIZE = 15;
+    const filesToUpload = legitimateFiles;
     const chunks = [];
-    for (let i = 0; i < totalFiles; i += BATCH_SIZE) {
-      chunks.push(fileList.slice(i, i + BATCH_SIZE));
+    for (let i = 0; i < filesToUpload.length; i += BATCH_SIZE) {
+      chunks.push(filesToUpload.slice(i, i + BATCH_SIZE));
     }
 
     try {
@@ -208,16 +300,39 @@ export default function AdminFilesTab() {
 
         chunk.forEach((f) => {
           formData.append("files", f);
-          const relPath = f.webkitRelativePath || f.name;
+          const relPath = (f.webkitRelativePath || f.name).replace(/\\/g, "/");
           formData.append("relative_paths", relPath);
         });
 
         setUploadStatusText(
           `Uploading batch ${cIdx + 1} of ${chunks.length} (${Math.min(
             (cIdx + 1) * BATCH_SIZE,
-            totalFiles
-          )} / ${totalFiles} files)...`
+            filesToUpload.length
+          )} / ${filesToUpload.length} files)...`
         );
+
+        const matchItem = (record, itemsPool) => {
+          const recRel = (record.relative_path || "").replace(/\\/g, "/").trim();
+          const recName = (record.original_filename || record.filename || "").trim();
+
+          if (recRel) {
+            const byPath = itemsPool.find(
+              (it) => it.relative_path && it.relative_path.replace(/\\/g, "/").trim() === recRel
+            );
+            if (byPath) return byPath;
+          }
+
+          const byChunkName = itemsPool.find(
+            (it) =>
+              (it.filename === recName || it.original_filename === recName) &&
+              chunk.some((cf) => cf === it.fileObject)
+          );
+          if (byChunkName) return byChunkName;
+
+          return itemsPool.find(
+            (it) => it.filename === recName || it.original_filename === recName
+          );
+        };
 
         try {
           const res = await apiClient("/admin/training-files/upload/", {
@@ -226,17 +341,56 @@ export default function AdminFilesTab() {
           });
 
           if (res) {
-            uploadedCount += res.created_count || 0;
-            skippedCount += res.skipped_count || 0;
-            failedCount += res.failed_count || 0;
-            if (Array.isArray(res.created)) allCreated.push(...res.created);
-            if (Array.isArray(res.skipped)) allSkipped.push(...res.skipped);
-            if (Array.isArray(res.failed)) allFailed.push(...res.failed);
+            if (Array.isArray(res.created)) {
+              res.created.forEach((c) => {
+                const target = matchItem(c, trackedItems);
+                if (target) {
+                  target.status = "SUCCESS";
+                  target.id = c.id;
+                  target.checksum = c.checksum;
+                  if (c.relative_path) target.relative_path = c.relative_path.replace(/\\/g, "/");
+                  target.file_size = c.file_size || target.file_size;
+                }
+              });
+            }
+
+            if (Array.isArray(res.skipped)) {
+              res.skipped.forEach((s) => {
+                const target = matchItem(s, trackedItems);
+                if (target) {
+                  target.status = "DUPLICATE";
+                  target.reason = s.reason;
+                  target.existing_id = s.existing_id;
+                  if (s.relative_path) target.relative_path = s.relative_path.replace(/\\/g, "/");
+                  target.file_size = s.file_size || target.file_size;
+                }
+              });
+            }
+
+            if (Array.isArray(res.failed)) {
+              res.failed.forEach((fail) => {
+                const target = matchItem(fail, trackedItems);
+                if (target) {
+                  target.status = "FAILED";
+                  target.error = fail.error;
+                  target.category = fail.category || "UPLOAD_ERROR";
+                  target.retry_count = (target.retry_count || 0) + (existingBatch ? 1 : 0);
+                }
+              });
+            }
           }
         } catch (batchErr) {
           chunk.forEach((f) => {
-            allFailed.push({ filename: f.name, error: batchErr.message });
-            failedCount++;
+            const fRel = (f.webkitRelativePath || f.name).replace(/\\/g, "/");
+            const target = trackedItems.find(
+              (it) => it.fileObject === f || (it.relative_path && it.relative_path === fRel)
+            );
+            if (target && target.status !== "SUCCESS" && target.status !== "DUPLICATE") {
+              target.status = "FAILED";
+              target.error = batchErr.message || "Network request failed.";
+              target.category = "NETWORK_ERROR";
+              target.retry_count = (target.retry_count || 0) + (existingBatch ? 1 : 0);
+            }
           });
         }
 
@@ -244,17 +398,35 @@ export default function AdminFilesTab() {
         setUploadProgress(pct);
       }
 
-      setUploadResults({
-        created: allCreated,
-        skipped: allSkipped,
-        failed: allFailed,
-        uploadedCount,
-        skippedCount,
-        failedCount,
-      });
+      const finalSuccess = trackedItems.filter((i) => i.status === "SUCCESS");
+      const finalDup = trackedItems.filter((i) => i.status === "DUPLICATE");
+      const finalIgnored = trackedItems.filter((i) => i.status === "IGNORED");
+      const finalFail = trackedItems.filter((i) => i.status === "FAILED");
 
-      if (uploadedCount > 0) {
-        setSuccessMessage(`Successfully uploaded ${uploadedCount} file(s). Files are placed in library.`);
+      const batchSummary = {
+        batchId,
+        timestamp,
+        totalFiles,
+        items: trackedItems,
+        uploadedCount: finalSuccess.length,
+        skippedCount: finalDup.length,
+        ignoredCount: finalIgnored.length,
+        failedCount: finalFail.length,
+      };
+
+      setUploadResults(batchSummary);
+      setShowReportModal(true);
+      saveBatchToHistory(batchSummary);
+
+      let msg = "";
+      if (finalSuccess.length > 0) {
+        msg += `Successfully uploaded ${finalSuccess.length} file(s). `;
+      }
+      if (finalIgnored.length > 0) {
+        msg += `${finalIgnored.length} system/metadata file(s) ignored.`;
+      }
+      if (msg) {
+        setSuccessMessage(msg.trim());
       }
 
       await loadData();
@@ -264,6 +436,102 @@ export default function AdminFilesTab() {
       setIsUploading(false);
       setUploadProgress(100);
       setUploadStatusText("");
+    }
+  };
+
+  const handleRetrySingle = async (failedItem) => {
+    if (!failedItem || !failedItem.fileObject || isRetrying) return;
+    setIsRetrying(true);
+    try {
+      const formData = new FormData();
+      formData.append("files", failedItem.fileObject);
+      formData.append("relative_paths", failedItem.relative_path || failedItem.filename);
+
+      const res = await apiClient("/admin/training-files/upload/", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (res && uploadResults) {
+        const updatedItems = uploadResults.items.map((it) => {
+          const isTarget =
+            (failedItem.client_id && it.client_id === failedItem.client_id) ||
+            (it.relative_path && failedItem.relative_path && it.relative_path === failedItem.relative_path) ||
+            it.filename === failedItem.filename;
+
+          if (isTarget) {
+            if (res.created && res.created.length > 0) {
+              const c = res.created[0];
+              return {
+                ...it,
+                status: "SUCCESS",
+                id: c.id,
+                error: null,
+                checksum: c.checksum,
+                relative_path: c.relative_path ? c.relative_path.replace(/\\/g, "/") : it.relative_path,
+                retry_count: (it.retry_count || 0) + 1,
+              };
+            }
+            if (res.skipped && res.skipped.length > 0) {
+              const s = res.skipped[0];
+              return {
+                ...it,
+                status: "DUPLICATE",
+                reason: s.reason,
+                existing_id: s.existing_id,
+                error: null,
+                checksum: s.checksum,
+                relative_path: s.relative_path ? s.relative_path.replace(/\\/g, "/") : it.relative_path,
+                retry_count: (it.retry_count || 0) + 1,
+              };
+            }
+            if (res.failed && res.failed.length > 0) {
+              const f = res.failed[0];
+              return {
+                ...it,
+                status: "FAILED",
+                error: f.error,
+                category: f.category,
+                retry_count: (it.retry_count || 0) + 1,
+              };
+            }
+          }
+          return it;
+        });
+
+        const newSuccess = updatedItems.filter((i) => i.status === "SUCCESS").length;
+        const newDup = updatedItems.filter((i) => i.status === "DUPLICATE").length;
+        const newFail = updatedItems.filter((i) => i.status === "FAILED").length;
+
+        const updatedBatch = {
+          ...uploadResults,
+          items: updatedItems,
+          uploadedCount: newSuccess,
+          skippedCount: newDup,
+          failedCount: newFail,
+        };
+        setUploadResults(updatedBatch);
+        saveBatchToHistory(updatedBatch);
+        await loadData();
+      }
+    } catch (err) {
+      setError(err.message || "Failed to retry upload.");
+    } finally {
+      setIsRetrying(false);
+    }
+  };
+
+  const handleRetryAllFailed = async () => {
+    if (!uploadResults || isRetrying) return;
+    const failedWithFiles = uploadResults.items.filter((i) => i.status === "FAILED" && i.fileObject);
+    if (failedWithFiles.length === 0) return;
+
+    setIsRetrying(true);
+    try {
+      const filesToRetry = failedWithFiles.map((i) => i.fileObject);
+      await processUploadFiles(filesToRetry, uploadResults);
+    } finally {
+      setIsRetrying(false);
     }
   };
 
@@ -469,32 +737,85 @@ export default function AdminFilesTab() {
         </div>
       )}
 
-      {/* Upload Summary Modal */}
+      {/* Upload Summary Banner & Modal Trigger */}
       {uploadResults && (
-        <div className="card" style={{ marginBottom: "20px", borderLeft: "4px solid var(--accent-primary)", padding: "16px 20px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-            <h4 style={{ margin: 0, fontSize: "14px", fontWeight: "700" }}>Batch Processing Summary</h4>
-            <button
-              type="button"
-              className="btn btn-secondary"
-              style={{ padding: "2px 8px", fontSize: "11px" }}
-              onClick={() => setUploadResults(null)}
-            >
-              Dismiss
-            </button>
+        <div
+          className="card"
+          style={{
+            marginBottom: "20px",
+            borderLeft: `4px solid ${uploadResults.failedCount > 0 ? "var(--status-error, #ef4444)" : "var(--status-success, #10b981)"}`,
+            padding: "16px 20px",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px", flexWrap: "wrap", gap: "8px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              <h4 style={{ margin: 0, fontSize: "14px", fontWeight: "700" }}>Batch Processing Summary</h4>
+              <span style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
+                ID: <code>{uploadResults.batchId}</code>
+              </span>
+            </div>
+            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                style={{ padding: "4px 12px", fontSize: "12px", fontWeight: "600" }}
+                onClick={() => setShowReportModal(true)}
+              >
+                View Detailed Report ({uploadResults.items?.length || uploadResults.totalFiles} Files)
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{ padding: "4px 8px", fontSize: "11px" }}
+                onClick={() => setUploadResults(null)}
+              >
+                Dismiss
+              </button>
+            </div>
           </div>
-          <div style={{ display: "flex", gap: "24px", fontSize: "13px" }}>
-            <span style={{ color: "var(--text-success, #10b981)" }}>
+          <div style={{ display: "flex", gap: "24px", fontSize: "13px", flexWrap: "wrap" }}>
+            <span style={{ color: "var(--text-secondary)" }}>
+              Total: <strong>{uploadResults.totalFiles || uploadResults.items?.length || 0}</strong>
+            </span>
+            <span style={{ color: "var(--status-success, #10b981)" }}>
               <strong>{uploadResults.uploadedCount}</strong> Uploaded
             </span>
-            <span style={{ color: "var(--text-warning, #f59e0b)" }}>
+            <span style={{ color: "#d97706" }}>
               <strong>{uploadResults.skippedCount}</strong> Duplicate(s) Skipped
             </span>
-            <span style={{ color: "var(--text-danger, #ef4444)" }}>
+            <span style={{ color: "var(--status-error, #ef4444)" }}>
               <strong>{uploadResults.failedCount}</strong> Failed
             </span>
           </div>
         </div>
+      )}
+
+      {/* Persistent Upload History Banner / Quick Launcher */}
+      {!uploadResults && uploadHistory.length > 0 && (
+        <div style={{ marginBottom: "14px", display: "flex", justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            style={{ fontSize: "11px", padding: "3px 10px", color: "var(--text-secondary)" }}
+            onClick={() => {
+              setUploadResults(uploadHistory[0]);
+              setShowReportModal(true);
+            }}
+          >
+            📋 View Latest Upload Batch Report ({new Date(uploadHistory[0].timestamp).toLocaleTimeString()})
+          </button>
+        </div>
+      )}
+
+      {/* Detailed Modal Dialog */}
+      {showReportModal && uploadResults && (
+        <BatchUploadReportModal
+          uploadBatch={uploadResults}
+          onClose={() => setShowReportModal(false)}
+          onRetrySingle={handleRetrySingle}
+          onRetryAllFailed={handleRetryAllFailed}
+          isRetrying={isRetrying}
+        />
       )}
 
       {/* Sub-navigation View Modes */}

@@ -4,11 +4,12 @@ import { useAuth } from "../hooks/useAuth";
 import TrainerOverviewTab from "./trainer/TrainerOverviewTab";
 import TrainerCoursesTab from "./trainer/TrainerCoursesTab";
 import TrainerProjectsTab from "./trainer/TrainerProjectsTab";
+import TrainerAssessmentViewerTab from "./trainer/TrainerAssessmentViewerTab";
 import AdminReportsTab from "./admin/AdminReportsTab";
 
 export default function TrainerPortal() {
   const { user, activePortal } = useAuth();
-  const [activeTab, setActiveTab] = useState("overview"); // 'overview' | 'courses' | 'learners' | 'projects'
+  const [activeTab, setActiveTab] = useState("overview"); // 'overview' | 'courses' | 'questions' | 'learners' | 'projects'
 
   const isAdminPreview = user?.role === "ADMIN" && activePortal === "TRAINER";
 
@@ -30,6 +31,8 @@ export default function TrainerPortal() {
             ? "Trainer Oversight Command Center"
             : activeTab === "courses"
             ? "Published Curriculum Catalogue"
+            : activeTab === "questions"
+            ? "Assessment Question Bank"
             : activeTab === "projects"
             ? "Assigned Projects & Submissions Oversight"
             : "Trainer Reports & Completion Analytics"}
@@ -41,6 +44,8 @@ export default function TrainerPortal() {
             ? `Welcome back, ${user?.username}. You are authenticated as an LMS Trainer with cohort-scoped access.`
             : activeTab === "courses"
             ? "Inspect all Administrator-published courses, modules, submodules, and supplementary learning documents in read-only mode."
+            : activeTab === "questions"
+            ? "Inspect all assessment questions, answer options, and correct answers associated with Admin-published modules in verified read-only mode."
             : activeTab === "projects"
             ? "Inspect assigned projects, download guidance materials, and evaluate learner submissions."
             : "Review cohort completion records, module evaluations, and learner performance statistics."}
@@ -57,6 +62,10 @@ export default function TrainerPortal() {
 
       {activeTab === "courses" && (
         <TrainerCoursesTab />
+      )}
+
+      {activeTab === "questions" && (
+        <TrainerAssessmentViewerTab />
       )}
 
       {activeTab === "projects" && (

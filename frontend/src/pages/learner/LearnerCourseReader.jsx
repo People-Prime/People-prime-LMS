@@ -1632,7 +1632,7 @@ export default function LearnerCourseReader({
                               </span>
                             ) : completionStatus.result === "FAIL" ? (
                               <span className="badge badge-error" style={{ fontSize: "12px", padding: "4px 10px", display: "inline-flex", alignItems: "center", gap: "6px" }}>
-                                <span style={{ fontWeight: "700" }}>FAIL</span> • Not Completed / In Progress ({completionStatus.marks_obtained} / {completionStatus.total_marks || 5} Marks - Passing is 3/5)
+                                <span style={{ fontWeight: "700" }}>FAIL</span> • Not Completed / In Progress ({completionStatus.marks_obtained} / {completionStatus.total_marks || 5} Marks - Passing is {completionStatus.minimum_passing_score || Math.ceil((completionStatus.total_marks || 5) * 0.5)}/{completionStatus.total_marks || 5})
                               </span>
                             ) : (
                               <span className="badge badge-warning" style={{ fontSize: "12px", padding: "4px 10px" }}>
@@ -1712,13 +1712,18 @@ export default function LearnerCourseReader({
                             <div style={{ fontSize: "12px", fontWeight: "600", color: "var(--text-main)", display: "flex", alignItems: "center", gap: "8px" }}>
                               <span>Attempt #{completionStatus.latest_attempt.attempt_number} Score ({completionStatus.latest_attempt.percentage}%)</span>
                               {completionStatus.is_tested_module && completionStatus.latest_attempt.is_completed && (
-                                <span className={`badge ${completionStatus.latest_attempt.score >= 3.0 ? "badge-success" : "badge-error"}`} style={{ fontSize: "10px", padding: "1px 6px" }}>
-                                  {completionStatus.latest_attempt.score >= 3.0 ? "PASS" : "FAIL"}
+                                <span className={`badge ${completionStatus.latest_attempt.score >= (completionStatus.minimum_passing_score || Math.ceil((completionStatus.latest_attempt.total_possible || 5) * 0.5)) ? "badge-success" : "badge-error"}`} style={{ fontSize: "10px", padding: "1px 6px" }}>
+                                  {completionStatus.latest_attempt.score >= (completionStatus.minimum_passing_score || Math.ceil((completionStatus.latest_attempt.total_possible || 5) * 0.5)) ? "PASS" : "FAIL"}
                                 </span>
                               )}
                             </div>
                             <div style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
-                              Status: {completionStatus.latest_attempt.is_completed ? "Completed" : "In Progress"} • Passing requirement: 3.0 / 5.0 (60%)
+                              {(() => {
+                                const totPoss = completionStatus.latest_attempt.total_possible || completionStatus.total_marks || 5;
+                                const minPass = completionStatus.minimum_passing_score || Math.ceil(totPoss * 0.5);
+                                const passPct = Math.round((minPass / totPoss) * 100);
+                                return `Status: ${completionStatus.latest_attempt.is_completed ? "Completed" : "In Progress"} • Passing requirement: ${minPass} / ${totPoss} (${passPct}%)`;
+                              })()}
                             </div>
                           </div>
                         </div>

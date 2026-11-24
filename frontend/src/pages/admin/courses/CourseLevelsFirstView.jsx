@@ -35,12 +35,28 @@ export default function CourseLevelsFirstView({
   onOpenPreviewCourseModal,
   onSelectCourse,
   getStatusBadge,
+  selectedLevel: propSelectedLevel = null,
+  onSelectLevel = null,
+  selectedCourseInLevel: propSelectedCourseInLevel = null,
+  onSelectCourseInLevel = null,
 }) {
   // Navigation drill-down state inside Level-First view:
-  // selectedLevel: CourseLevel object | null
-  // selectedCourseInLevel: Course object | null
-  const [selectedLevel, setSelectedLevel] = useState(null);
-  const [selectedCourseInLevel, setSelectedCourseInLevel] = useState(null);
+  // Falls back to local state if props are not provided
+  const [internalSelectedLevel, setInternalSelectedLevel] = useState(null);
+  const [internalSelectedCourseInLevel, setInternalSelectedCourseInLevel] = useState(null);
+
+  const selectedLevel = propSelectedLevel !== undefined && propSelectedLevel !== null ? propSelectedLevel : internalSelectedLevel;
+  const setSelectedLevel = (lvl) => {
+    if (onSelectLevel) onSelectLevel(lvl);
+    setInternalSelectedLevel(lvl);
+  };
+
+  const selectedCourseInLevel = propSelectedCourseInLevel !== undefined && propSelectedCourseInLevel !== null ? propSelectedCourseInLevel : internalSelectedCourseInLevel;
+  const setSelectedCourseInLevel = (crs) => {
+    if (onSelectCourseInLevel) onSelectCourseInLevel(crs);
+    setInternalSelectedCourseInLevel(crs);
+  };
+
   const [moduleSearch, setModuleSearch] = useState("");
   const [moduleStatusFilter, setModuleStatusFilter] = useState("ALL");
 
@@ -329,12 +345,6 @@ export default function CourseLevelsFirstView({
                             <ActionMenu
                               actions={[
                                 {
-                                  label: "Upload Content",
-                                  icon: "📤",
-                                  onClick: () => onOpenUploadModuleModal && onOpenUploadModuleModal(m),
-                                  title: "Upload file directly into this module",
-                                },
-                                {
                                   label: "Open in New Tab",
                                   icon: "↗",
                                   onClick: () => handleOpenModuleInNewTab(effectiveCourse?.id || m.course, m.id),
@@ -347,8 +357,11 @@ export default function CourseLevelsFirstView({
                                     const modCourse =
                                       (m.course ? courses.find((c) => c.id === m.course) : null) ||
                                       effectiveCourse;
-                                    if (modCourse) onSelectCourse(modCourse);
-                                    if (onOpenModuleContent) onOpenModuleContent(m);
+                                    if (onOpenModuleContent) {
+                                      onOpenModuleContent(m, { course: modCourse, level: selectedLevel });
+                                    } else if (modCourse && onSelectCourse) {
+                                      onSelectCourse(modCourse);
+                                    }
                                   },
                                   title: "Open module lessons, attached materials, and questions",
                                 },

@@ -22,6 +22,8 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
   // Level 1: selectedCourse === null (Course Catalog or Global Repository)
   // Level 2: selectedCourse !== null (Course Management Workspace)
   const [selectedCourse, setSelectedCourse] = useState(null);
+  const [selectedLevel, setSelectedLevel] = useState(null); // Preserves active level context across navigation
+  const [openedFromLevelView, setOpenedFromLevelView] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState(initialWorkspaceTab || "curriculum"); // 'curriculum' | 'materials' | 'repository'
 
   useEffect(() => {
@@ -225,16 +227,33 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
     }
   }, []);
 
-  const handleOpenModuleContent = (module) => {
+  const handleOpenModuleContent = (module, context = {}) => {
     setActiveModule(module);
     setModuleSubTab("submodules");
     setError(null);
     setSuccessMessage("");
+    if (context.level) {
+      setSelectedLevel(context.level);
+      setOpenedFromLevelView(true);
+    } else if (module.level) {
+      const foundLevel = courseLevels.find((lvl) => lvl.id === module.level);
+      if (foundLevel) {
+        setSelectedLevel(foundLevel);
+        setOpenedFromLevelView(true);
+      } else {
+        setOpenedFromLevelView(false);
+      }
+    } else {
+      setOpenedFromLevelView(false);
+    }
     loadModuleDetails(module.id);
   };
 
   const handleCloseModuleContent = () => {
     setActiveModule(null);
+    if (openedFromLevelView) {
+      setSelectedCourse(null);
+    }
     loadData();
   };
 
@@ -254,6 +273,7 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
 
   const handleBackToCatalog = () => {
     setSelectedCourse(null);
+    setSelectedLevel(null);
     setWorkspaceTab("curriculum");
     setActiveModule(null);
     setError(null);
@@ -265,6 +285,7 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
 
   const handleOpenGlobalRepository = () => {
     setSelectedCourse(null);
+    setSelectedLevel(null);
     setWorkspaceTab("repository");
     setActiveModule(null);
     setError(null);
@@ -1425,6 +1446,8 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
               modules={modules}
               clusters={clusters}
               mappings={mappings}
+              selectedLevel={selectedLevel}
+              onSelectLevel={setSelectedLevel}
               onOpenGlobalRepository={handleOpenGlobalRepository}
               onOpenCreateCourseModal={handleOpenCreateCourseModal}
               onOpenCreateLevelModal={handleOpenCreateLevelModal}
@@ -1477,6 +1500,8 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
             <CourseCurriculumView
               selectedCourse={selectedCourse}
               courseLevels={courseLevels}
+              selectedLevel={selectedLevel}
+              onSelectLevel={setSelectedLevel}
               onOpenCreateLevelModal={handleOpenCreateLevelModal}
               onOpenEditLevelModal={handleOpenEditLevelModal}
               onDeleteLevel={handleDeleteLevel}

@@ -34,6 +34,53 @@ CATEGORY_EXTENSION_MAP = {
 }
 
 
+def is_os_metadata_file(path_or_filename):
+    """
+    Identifies operating-system metadata, desktop indexing, and thumbnail artifacts:
+    - Windows: desktop.ini, Thumbs.db, ehthumbs.db
+    - macOS: .DS_Store, __MACOSX directory components, AppleDouble files (._filename)
+    - Linux / editors: .directory, .Trash-*, etc.
+    Returns True if the file or any segment in its relative path is an OS metadata artifact.
+    """
+    if not path_or_filename:
+        return False
+
+    norm = str(path_or_filename).replace("\\", "/").strip()
+    segments = [s.strip() for s in norm.split("/") if s.strip()]
+
+    # 1. Check if any parent folder segment is an OS metadata folder (e.g. __MACOSX, .Trash-1000)
+    for seg in segments:
+        seg_lower = seg.lower()
+        if seg_lower in ("__macosx", ".trash", ".trashes", ".fseventsd", ".spotlight-v100"):
+            return True
+        if seg_lower.startswith(".trash-"):
+            return True
+
+    # 2. Check the base filename
+    base_name = segments[-1] if segments else os.path.basename(norm)
+    base_lower = base_name.lower()
+
+    # Exact matches for known metadata files
+    if base_lower in (
+        "desktop.ini",
+        "thumbs.db",
+        "ehthumbs.db",
+        ".ds_store",
+        ".localized",
+        ".directory",
+    ):
+        return True
+
+    if base_lower.startswith(".trash-"):
+        return True
+
+    # AppleDouble files start with ._ (e.g. ._IMG_1234.JPG, ._Document.docx)
+    if base_name.startswith("._"):
+        return True
+
+    return False
+
+
 def sanitize_relative_path(path_str):
     """
     Sanitizes a client-provided relative path to prevent directory traversal.

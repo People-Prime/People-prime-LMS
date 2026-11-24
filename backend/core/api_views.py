@@ -1,8 +1,8 @@
 """
-People Prime LMS — Phase 3 Step 2: Curriculum and Learning Material REST API Views.
+People Prime LMS â€” Phase 3 Step 2: Curriculum and Learning Material REST API Views.
 
 Implements ModelViewSet-based REST endpoints for the full learning hierarchy
-(Program → Course → Module → Submodule), LearningMaterial CRUD with publish/download
+(Program â†’ Course â†’ Module â†’ Submodule), LearningMaterial CRUD with publish/download
 custom actions, MaterialVersion read-only endpoints, and comprehensive AuditLog writing.
 """
 
@@ -56,9 +56,10 @@ from core.models import (
     ProjectSubmission,
     ProjectSubmissionFile,
 )
+from core.assessment_utils import get_minimum_passing_score, is_assessment_passed
 from core.permissions import IsLMSAdmin
 from core.audit_utils import generate_audit_description
-from core.validators import sanitize_relative_path, validate_learning_material_file
+from core.validators import is_os_metadata_file, sanitize_relative_path, validate_learning_material_file
 from core.serializers import (
     CandidateTypeSerializer,
     CourseLevelSerializer,
@@ -695,8 +696,8 @@ class CourseLevelViewSet(viewsets.ModelViewSet):
     CRUD endpoints for CourseLevel entities (e.g., Level 1, Level 2, Level 3).
 
     Permission matrix:
-      list / retrieve  → Authenticated users scoped to accessible courses
-      create / update / partial_update / destroy → ADMIN only
+      list / retrieve  â†’ Authenticated users scoped to accessible courses
+      create / update / partial_update / destroy â†’ ADMIN only
     """
     serializer_class = CourseLevelSerializer
     permission_classes = [IsAuthenticated]
@@ -787,8 +788,8 @@ class ModuleViewSet(viewsets.ModelViewSet):
     CRUD endpoints for Module entities.
 
     Permission matrix:
-      list / retrieve  → any authenticated user (role-scoped queryset)
-      create / update / partial_update / destroy → ADMIN only
+      list / retrieve  â†’ any authenticated user (role-scoped queryset)
+      create / update / partial_update / destroy â†’ ADMIN only
     """
     serializer_class = ModuleSerializer
     permission_classes = [IsAuthenticated]
@@ -1542,6 +1543,43 @@ class ModuleViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
 
+        # Check if file is PPT / PPTX for read-only preview conversion
+        is_pptx = (
+            (tf.file_type and tf.file_type.upper() in ["PPTX", "PPT", "POWERPOINT"])
+            or tf.filename.lower().endswith((".pptx", ".ppt"))
+            or content_type in [
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "application/vnd.ms-powerpoint",
+            ]
+        )
+
+        if is_pptx:
+            from core.document_preview import get_or_create_presentation_preview
+            try:
+                preview_pdf_path = get_or_create_presentation_preview(tf)
+                preview_file_size = os.path.getsize(preview_pdf_path)
+                preview_filename = os.path.splitext(tf.filename)[0] + ".pdf"
+                response = FileResponse(
+                    open(preview_pdf_path, "rb"),
+                    content_type="application/pdf",
+                )
+                response["Content-Disposition"] = f'inline; filename="{preview_filename}"'
+                response["Content-Length"] = preview_file_size
+                response["Cache-Control"] = "private, no-cache, no-store, must-revalidate"
+                response["X-Content-Type-Options"] = "nosniff"
+                response["X-Frame-Options"] = "SAMEORIGIN"
+                return response
+            except Exception as e:
+                logger.error("PowerPoint preview generation error for training file %s: %s", tf.id, e)
+                return Response(
+                    {
+                        "error": "Failed to generate read-only presentation preview.",
+                        "filename": tf.filename,
+                        "file_type": tf.file_type,
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
         # Block any attempt to download or fall back to attachment
         if content_type not in SAFE_INLINE_MIMES:
             return Response(
@@ -1569,8 +1607,8 @@ class SubmoduleViewSet(viewsets.ModelViewSet):
     CRUD endpoints for Submodule entities.
 
     Permission matrix:
-      list / retrieve  → any authenticated user (role-scoped queryset)
-      create / update / partial_update / destroy → ADMIN only
+      list / retrieve  â†’ any authenticated user (role-scoped queryset)
+      create / update / partial_update / destroy â†’ ADMIN only
 
     Note: Submodule has no `created_by` field (do not inject one).
     """
@@ -1897,6 +1935,43 @@ class SubmoduleViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
 
+        # Check if file is PPT / PPTX for read-only preview conversion
+        is_pptx = (
+            (tf.file_type and tf.file_type.upper() in ["PPTX", "PPT", "POWERPOINT"])
+            or tf.filename.lower().endswith((".pptx", ".ppt"))
+            or content_type in [
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "application/vnd.ms-powerpoint",
+            ]
+        )
+
+        if is_pptx:
+            from core.document_preview import get_or_create_presentation_preview
+            try:
+                preview_pdf_path = get_or_create_presentation_preview(tf)
+                preview_file_size = os.path.getsize(preview_pdf_path)
+                preview_filename = os.path.splitext(tf.filename)[0] + ".pdf"
+                response = FileResponse(
+                    open(preview_pdf_path, "rb"),
+                    content_type="application/pdf",
+                )
+                response["Content-Disposition"] = f'inline; filename="{preview_filename}"'
+                response["Content-Length"] = preview_file_size
+                response["Cache-Control"] = "private, no-cache, no-store, must-revalidate"
+                response["X-Content-Type-Options"] = "nosniff"
+                response["X-Frame-Options"] = "SAMEORIGIN"
+                return response
+            except Exception as e:
+                logger.error("PowerPoint preview generation error for training file %s: %s", tf.id, e)
+                return Response(
+                    {
+                        "error": "Failed to generate read-only presentation preview.",
+                        "filename": tf.filename,
+                        "file_type": tf.file_type,
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
         # Block any attempt to download or fall back to attachment
         # Only safe inline previewing is permitted
         if content_type not in SAFE_INLINE_MIMES:
@@ -2175,6 +2250,43 @@ class SubmoduleViewSet(viewsets.ModelViewSet):
                 return Response(
                     {
                         "error": "Failed to generate read-only document preview.",
+                        "filename": tf.filename,
+                        "file_type": tf.file_type,
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+        # Check if file is PPT / PPTX for read-only preview conversion
+        is_pptx = (
+            (tf.file_type and tf.file_type.upper() in ["PPTX", "PPT", "POWERPOINT"])
+            or tf.filename.lower().endswith((".pptx", ".ppt"))
+            or content_type in [
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "application/vnd.ms-powerpoint",
+            ]
+        )
+
+        if is_pptx:
+            from core.document_preview import get_or_create_presentation_preview
+            try:
+                preview_pdf_path = get_or_create_presentation_preview(tf)
+                preview_file_size = os.path.getsize(preview_pdf_path)
+                preview_filename = os.path.splitext(tf.filename)[0] + ".pdf"
+                response = FileResponse(
+                    open(preview_pdf_path, "rb"),
+                    content_type="application/pdf",
+                )
+                response["Content-Disposition"] = f'inline; filename="{preview_filename}"'
+                response["Content-Length"] = preview_file_size
+                response["Cache-Control"] = "private, no-cache, no-store, must-revalidate"
+                response["X-Content-Type-Options"] = "nosniff"
+                response["X-Frame-Options"] = "SAMEORIGIN"
+                return response
+            except Exception as e:
+                logger.error("PowerPoint preview generation error for training file %s: %s", tf.id, e)
+                return Response(
+                    {
+                        "error": "Failed to generate read-only presentation preview.",
                         "filename": tf.filename,
                         "file_type": tf.file_type,
                     },
@@ -3063,14 +3175,16 @@ class ModuleQuestionResponseViewSet(viewsets.ModelViewSet):
 
         # All questions count (all active questions are mandatory)
         all_questions_count = ModuleQuestion.objects.filter(module=module, is_active=True).count()
-        # A module is an assessment (tested) module if it has at least 5 questions (assessment mode)
-        # Or has multiple choice questions where total_questions >= 5
+        # Query attempts count
+        attempt_count = ModuleAssessmentAttempt.objects.filter(module=module, learner=target_learner).count()
+        # A module is an assessment (tested) module if it has at least 5 questions,
+        # has MCQ questions, or has assessment attempts recorded
         has_mcq_questions = ModuleQuestion.objects.filter(
             module=module,
             is_active=True,
             question_type="MULTIPLE_CHOICE",
         ).exists()
-        is_tested_module = (all_questions_count >= 5) or (has_mcq_questions and all_questions_count >= 5)
+        is_tested_module = (all_questions_count >= 5) or has_mcq_questions or (attempt_count > 0)
         
         # Latest attempt answered count, or unique distinct active questions answered across attempts capped at total
         latest_attempt_obj = ModuleAssessmentAttempt.objects.filter(module=module, learner=target_learner).order_by("-attempt_number").first()
@@ -3089,12 +3203,17 @@ class ModuleQuestionResponseViewSet(viewsets.ModelViewSet):
         latest_attempt = attempts_list[0] if attempts_list else None
 
         # Assessment pass/fail logic:
-        # Minimum passing score is 3/5 (60%).
-        # If the module has assessment questions, it is COMPLETED ONLY when the learner has achieved score >= 3.0.
+        # Dynamic 50% passing rule with ceiling: minimum_correct = ceil(total_questions * 0.5).
         # A passing score from any attempt permanently marks the module completed.
-        best_attempt = ModuleAssessmentAttempt.objects.filter(module=module, learner=target_learner).order_by("-score").first()
+        best_attempt = ModuleAssessmentAttempt.objects.filter(module=module, learner=target_learner).order_by("-score", "-id").first()
         best_score = best_attempt.score if best_attempt else None
-        has_passed = bool(best_score is not None and best_score >= 3.0)
+
+        # Determine total questions applicable to calculate passing threshold for the best attempt
+        best_attempt_total = int(best_attempt.total_possible) if (best_attempt and best_attempt.total_possible) else None
+        latest_attempt_total = int(latest_attempt_obj.total_possible) if (latest_attempt_obj and latest_attempt_obj.total_possible) else None
+        applicable_total_questions = best_attempt_total or latest_attempt_total or (all_questions_count or 5)
+        min_passing_score = get_minimum_passing_score(applicable_total_questions)
+        has_passed = is_assessment_passed(best_score, applicable_total_questions)
 
         latest_attempt_completed = bool(latest_attempt_obj and latest_attempt_obj.is_completed)
         latest_score = latest_attempt_obj.score if latest_attempt_obj else None
@@ -3130,7 +3249,7 @@ class ModuleQuestionResponseViewSet(viewsets.ModelViewSet):
                     can_retake = True
 
         marks_obtained = int(latest_score) if latest_score is not None else (int(best_score) if best_score is not None else 0)
-        total_marks = int(latest_attempt_obj.total_possible) if latest_attempt_obj else (all_questions_count or 5)
+        total_marks = applicable_total_questions
 
         return Response({
             "module_id": module.id,
@@ -3144,6 +3263,7 @@ class ModuleQuestionResponseViewSet(viewsets.ModelViewSet):
             "has_passed": has_passed,
             "marks_obtained": marks_obtained,
             "total_marks": total_marks,
+            "minimum_passing_score": min_passing_score,
             "result": result_status,
             "can_retake": can_retake,
             "total_questions": all_questions_count,
@@ -3198,9 +3318,11 @@ class ModuleQuestionResponseViewSet(viewsets.ModelViewSet):
             learner=target_learner,
         ).order_by("-attempt_number").first()
 
-        # Check if learner has already passed the assessment (score >= 3.0 on any attempt)
-        best_attempt = ModuleAssessmentAttempt.objects.filter(module=module, learner=target_learner).order_by("-score").first()
-        has_passed = bool(best_attempt and best_attempt.score is not None and best_attempt.score >= 3.0)
+        # Check if learner has already passed the assessment
+        best_attempt = ModuleAssessmentAttempt.objects.filter(module=module, learner=target_learner).order_by("-score", "-id").first()
+        best_score = best_attempt.score if best_attempt else None
+        applicable_tot = int(best_attempt.total_possible) if (best_attempt and best_attempt.total_possible) else (int(latest_attempt.total_possible) if (latest_attempt and latest_attempt.total_possible) else (active_questions_count or 5))
+        has_passed = is_assessment_passed(best_score, applicable_tot)
 
         blocking_reasons = []
 
@@ -3322,9 +3444,12 @@ class ModuleQuestionResponseViewSet(viewsets.ModelViewSet):
 
             # Check if learner has already passed the assessment
             best_attempt = ModuleAssessmentAttempt.objects.filter(module=module, learner=request.user).order_by("-score").first()
-            if best_attempt and best_attempt.score is not None and best_attempt.score >= 3.0:
+            best_score = best_attempt.score if best_attempt else None
+            applicable_tot = int(best_attempt.total_possible) if (best_attempt and best_attempt.total_possible) else (active_questions_count or 5)
+            if is_assessment_passed(best_score, applicable_tot):
+                min_pass = get_minimum_passing_score(applicable_tot)
                 return Response(
-                    {"error": "You have already passed this assessment (score >= 3/5). Further retakes are locked."},
+                    {"error": f"You have already passed this assessment (score >= {min_pass}/{applicable_tot}). Further retakes are locked."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -3556,7 +3681,10 @@ def _calculate_learner_progress_metrics(learner, assigned_modules):
         percentage: float (rounded to 1 decimal place)
         module_details: list of dicts with per-module progress
     """
-    total_assigned = assigned_modules.count()
+    if isinstance(assigned_modules, list):
+        total_assigned = len(assigned_modules)
+    else:
+        total_assigned = assigned_modules.count()
     if total_assigned == 0:
         return 0, 0, 0, 0.0, []
 
@@ -3582,20 +3710,23 @@ def _calculate_learner_progress_metrics(learner, assigned_modules):
 
     answered_q_set = set(learner_responses)
 
-    # Pre-fetch assessment attempts for these modules
+    # Pre-fetch assessment attempts for these modules (storing best score and its total_possible)
     attempts = ModuleAssessmentAttempt.objects.filter(
         module_id__in=module_ids,
         learner=learner,
-    ).values("module_id", "score")
+    ).values("module_id", "score", "total_possible")
 
-    # Map module_id -> max_score
+    # Map module_id -> (max_score, total_possible) and set of modules with attempts
     module_best_score_map = {}
+    attempted_module_ids = set()
     for att in attempts:
         mid = att["module_id"]
+        attempted_module_ids.add(mid)
         sc = att["score"]
+        tot_poss = att.get("total_possible")
         if sc is not None:
-            if mid not in module_best_score_map or sc > module_best_score_map[mid]:
-                module_best_score_map[mid] = sc
+            if mid not in module_best_score_map or sc > module_best_score_map[mid][0]:
+                module_best_score_map[mid] = (sc, tot_poss)
 
     # Find which modules are tested modules (have MCQ / assessment questions)
     mcq_module_ids = set(ModuleQuestion.objects.filter(
@@ -3612,10 +3743,15 @@ def _calculate_learner_progress_metrics(learner, assigned_modules):
         total_required = len(req_q_set)
         answered_required = len(req_q_set.intersection(answered_q_set))
 
-        # Check pass status if module is tested assessment (5 questions)
-        if total_required >= 5:
-            best_sc = module_best_score_map.get(m.id)
-            is_completed = (best_sc is not None and best_sc >= 3.0)
+        # Consistent assessment classification:
+        # A module is an assessment if it has >= 5 required questions, has active MCQ questions, or has previous attempts
+        is_tested = (total_required >= 5) or (m.id in mcq_module_ids) or (m.id in attempted_module_ids)
+
+        if is_tested:
+            best_info = module_best_score_map.get(m.id)
+            best_sc = best_info[0] if best_info else None
+            tot_p = int(best_info[1]) if (best_info and best_info[1]) else (total_required or 5)
+            is_completed = is_assessment_passed(best_sc, tot_p)
         else:
             is_completed = (total_required > 0 and answered_required == total_required)
 
@@ -4325,6 +4461,12 @@ class AdminOversightViewSet(viewsets.ViewSet):
         for rq in req_questions:
             module_req_q_map[rq["module_id"]].add(rq["id"])
 
+        # Pre-fetch all active MCQ questions to detect tested assessment modules
+        mcq_module_ids = set(
+            ModuleQuestion.objects.filter(is_active=True, question_type="MULTIPLE_CHOICE")
+            .values_list("module_id", flat=True)
+        )
+
         all_learners = {l for l_list in group_to_learners.values() for l in l_list}
         learner_responses = (
             ModuleQuestionResponse.objects.filter(
@@ -4343,13 +4485,15 @@ class AdminOversightViewSet(viewsets.ViewSet):
                 learner__in=all_learners,
                 score__isnull=False,
             )
-            .values_list("learner_id", "module_id", "score")
+            .values_list("learner_id", "module_id", "score", "total_possible")
         )
         learner_best_score_map = defaultdict(dict)
-        for lid, mid, sc in learner_attempts:
-            prev_best = learner_best_score_map[lid].get(mid)
-            if prev_best is None or sc > prev_best:
-                learner_best_score_map[lid][mid] = sc
+        learner_attempted_modules = defaultdict(set)
+        for lid, mid, sc, tot_poss in learner_attempts:
+            learner_attempted_modules[lid].add(mid)
+            prev_entry = learner_best_score_map[lid].get(mid)
+            if prev_entry is None or sc > prev_entry[0]:
+                learner_best_score_map[lid][mid] = (sc, tot_poss)
 
         # Helper to compute group curriculum & progress
         def get_group_curriculum_and_progress(grp):
@@ -4424,7 +4568,7 @@ class AdminOversightViewSet(viewsets.ViewSet):
                         "modules_count": 1,
                     })
 
-            # Calculate learner progress across group modules (respecting 3/5 assessment pass threshold)
+            # Calculate learner progress across group modules (respecting dynamic 50% assessment pass threshold)
             grp_modules = list(grp_modules_dict.values())
             total_mods_count = len(grp_modules)
             completed_learners = 0
@@ -4436,13 +4580,17 @@ class AdminOversightViewSet(viewsets.ViewSet):
                 lnr_completed_mods = 0
                 ans_qs = learner_answered_map.get(lnr.id, set())
                 best_scores = learner_best_score_map.get(lnr.id, {})
+                lnr_attempted = learner_attempted_modules.get(lnr.id, set())
                 for m in grp_modules:
                     req_qs = module_req_q_map.get(m.id, set())
                     total_req = len(req_qs)
                     answered_req = len(req_qs.intersection(ans_qs))
-                    if total_req >= 5:
-                        best_sc = best_scores.get(m.id)
-                        is_mod_completed = (best_sc is not None and best_sc >= 3.0)
+                    is_tested = (total_req >= 5) or (m.id in mcq_module_ids) or (m.id in lnr_attempted)
+                    if is_tested:
+                        best_entry = best_scores.get(m.id)
+                        best_sc = best_entry[0] if best_entry else None
+                        tot_p = int(best_entry[1]) if (best_entry and best_entry[1]) else (total_req or 5)
+                        is_mod_completed = is_assessment_passed(best_sc, tot_p)
                     else:
                         is_mod_completed = (total_req > 0 and answered_req == total_req)
                     if is_mod_completed:
@@ -5427,17 +5575,29 @@ class ReportsViewSet(viewsets.ViewSet):
             ).values_list("question_id", flat=True)
         )
 
+        # Pre-fetch MCQ questions to identify tested modules
+        mcq_module_ids = set(
+            ModuleQuestion.objects.filter(
+                module_id__in=module_ids,
+                is_active=True,
+                question_type="MULTIPLE_CHOICE",
+            ).values_list("module_id", flat=True)
+        )
+
         attempts = ModuleAssessmentAttempt.objects.filter(
             module_id__in=module_ids,
             learner=learner,
-        ).values("module_id", "score")
+        ).values("module_id", "score", "total_possible")
         module_best_score_map = {}
+        attempted_module_ids = set()
         for att in attempts:
             mid = att["module_id"]
+            attempted_module_ids.add(mid)
             sc = att["score"]
+            tot_poss = att.get("total_possible")
             if sc is not None:
-                if mid not in module_best_score_map or sc > module_best_score_map[mid]:
-                    module_best_score_map[mid] = sc
+                if mid not in module_best_score_map or sc > module_best_score_map[mid][0]:
+                    module_best_score_map[mid] = (sc, tot_poss)
 
         completed_modules = 0
         has_started_any = len(answered_q_ids) > 0 or len(attempts) > 0
@@ -5446,9 +5606,12 @@ class ReportsViewSet(viewsets.ViewSet):
             req_set = module_req_map.get(m.id, set())
             total_req = len(req_set)
             answered_req = len(req_set.intersection(answered_q_ids))
-            if total_req >= 5:
-                best_sc = module_best_score_map.get(m.id)
-                if best_sc is not None and best_sc >= 3.0:
+            is_tested = (total_req >= 5) or (m.id in mcq_module_ids) or (m.id in attempted_module_ids)
+            if is_tested:
+                best_info = module_best_score_map.get(m.id)
+                best_sc = best_info[0] if best_info else None
+                tot_p = int(best_info[1]) if (best_info and best_info[1]) else (total_req or 5)
+                if is_assessment_passed(best_sc, tot_p):
                     completed_modules += 1
             else:
                 if total_req > 0 and answered_req == total_req:
@@ -5614,9 +5777,9 @@ class ReportsViewSet(viewsets.ViewSet):
                     m_level_name = m.level.name if m.level else None
 
                     if is_tested:
-                        # Existing LMS policy: 3/5 (60%) or percentage >= 60% is PASS
-                        passing_score = 3.0 if tot_possible == 5.0 else (0.6 * tot_possible)
-                        has_passed = (best_score is not None and best_score >= passing_score)
+                        # Dynamic 50% passing rule: ceil(total_questions * 0.5)
+                        passing_score = get_minimum_passing_score(int(tot_possible))
+                        has_passed = is_assessment_passed(best_score, int(tot_possible))
                         latest_completed = bool(latest_att and latest_att.is_completed)
 
                         pct_score = None
@@ -5640,7 +5803,7 @@ class ReportsViewSet(viewsets.ViewSet):
                             mod_status = "NOT STARTED"
                             not_start_count += 1
 
-                        score_disp = f"{int(best_score) if best_score.is_integer() else best_score}/{int(tot_possible) if tot_possible.is_integer() else tot_possible}" if best_score is not None else "—"
+                        score_disp = f"{int(best_score) if best_score.is_integer() else best_score}/{int(tot_possible) if tot_possible.is_integer() else tot_possible}" if best_score is not None else "â€”"
                         last_attempt_time = latest_att.completed_at or latest_att.started_at if latest_att else None
 
                         ar_list.append({
@@ -5669,8 +5832,8 @@ class ReportsViewSet(viewsets.ViewSet):
                         else:
                             mod_status = "NOT STARTED"
                             not_start_count += 1
-                        res = "—"
-                        score_disp = "—"
+                        res = "â€”"
+                        score_disp = "â€”"
 
                     modules_prog_list.append({
                         "module_id": m.id,
@@ -6111,9 +6274,9 @@ class ReportsViewSet(viewsets.ViewSet):
             lid = att.learner_id
             mid = att.module_id
             tot = float(att.total_possible) if att.total_possible is not None else 5.0
-            passing_score = 3.0 if tot == 5.0 else (0.6 * tot)
+            passing_score = get_minimum_passing_score(int(tot))
             sc = att.score
-            is_pass = (sc is not None and sc >= passing_score)
+            is_pass = is_assessment_passed(sc, int(tot))
             pct = round((sc / tot * 100.0), 1) if (sc is not None and tot > 0) else None
             dt = att.completed_at or att.started_at
 
@@ -6142,9 +6305,9 @@ class ReportsViewSet(viewsets.ViewSet):
         - Assessment Metrics: strictly evaluated on LATEST attempt per unique (learner, module) to prevent
           skewing from retakes.
         - Attention Criteria:
-          • Assessment-failed: learner's LATEST attempt on any module is failed.
-          • Low-progress: an enrollment is IN_PROGRESS and progress < 25%.
-          • Completed enrollments and NOT_STARTED (0%) enrollments do NOT trigger attention solely for low progress.
+          â€¢ Assessment-failed: learner's LATEST attempt on any module is failed.
+          â€¢ Low-progress: an enrollment is IN_PROGRESS and progress < 25%.
+          â€¢ Completed enrollments and NOT_STARTED (0%) enrollments do NOT trigger attention solely for low progress.
         """
         user = request.user
         learners_qs, accessible_modules_qs, accessible_course_ids = (
@@ -6306,10 +6469,10 @@ class ReportsViewSet(viewsets.ViewSet):
         - Bulk-fetches latest assessment attempts for all modules in scope in 1 query.
         - Bulk-fetches last activity timestamps via database aggregation.
         - Assessment status per enrollment is aggregated from the LATEST attempt of each tested module:
-          • PASS: all applicable tested modules have their latest attempt passed.
-          • FAIL: at least one applicable tested module has its latest attempt failed.
-          • IN_PROGRESS: tested modules have attempts, but not all are finished/passed.
-          • NOT_STARTED: no assessment attempts exist for the enrollment.
+          â€¢ PASS: all applicable tested modules have their latest attempt passed.
+          â€¢ FAIL: at least one applicable tested module has its latest attempt failed.
+          â€¢ IN_PROGRESS: tested modules have attempts, but not all are finished/passed.
+          â€¢ NOT_STARTED: no assessment attempts exist for the enrollment.
         - Respects role scope (Trainer strictly scoped to assigned groups/learners).
         - Supports pagination (10, 25, 50, 100).
         """
@@ -6512,9 +6675,9 @@ class ReportsViewSet(viewsets.ViewSet):
                     "level_id": enr_level_id,
                     "level_name": enr_level_name,
                     "groups": groups,
-                    "group_name": ", ".join(groups) if groups else "—",
+                    "group_name": ", ".join(groups) if groups else "â€”",
                     "trainers": trainers,
-                    "trainer_names": ", ".join(trainers) if trainers else "—",
+                    "trainer_names": ", ".join(trainers) if trainers else "â€”",
                     "overall_progress_percentage": pct,
                     "completed_modules": comp_count,
                     "total_required_modules": tot_req,
@@ -6544,11 +6707,11 @@ class ReportsViewSet(viewsets.ViewSet):
         """
         On-demand detailed report for an authorized single learner and optional course/level:
         - Distinguishes:
-          • Latest Attempt Score
-          • Best Score
-          • Attempt Count
-          • Latest Attempt Date
-          • Current Assessment Result (strictly based on Latest Attempt)
+          â€¢ Latest Attempt Score
+          â€¢ Best Score
+          â€¢ Attempt Count
+          â€¢ Latest Attempt Date
+          â€¢ Current Assessment Result (strictly based on Latest Attempt)
         - Historical attempts are fully preserved.
         - Scoped strictly by role permissions (Trainer cannot access unauthorized learners).
         """
@@ -6612,14 +6775,19 @@ class ReportsViewSet(viewsets.ViewSet):
                     if (latest_att and latest_att.total_possible is not None)
                     else (float(tot_q) if tot_q > 0 else 5.0)
                 )
+                best_tot_possible = (
+                    float(best_att.total_possible)
+                    if (best_att and best_att.total_possible is not None)
+                    else (float(tot_q) if tot_q > 0 else 5.0)
+                )
 
                 m_level_id = m.level_id
                 m_level_name = m.level.name if m.level else None
 
                 if is_tested:
-                    passing_score = 3.0 if tot_possible == 5.0 else (0.6 * tot_possible)
+                    passing_score = get_minimum_passing_score(int(tot_possible))
                     # Current Assessment Result is determined by the LATEST attempt
-                    latest_passed = (latest_score is not None and latest_score >= passing_score)
+                    latest_passed = is_assessment_passed(latest_score, int(tot_possible))
                     latest_completed = bool(latest_att and latest_att.is_completed)
 
                     pct_score = None
@@ -6643,8 +6811,8 @@ class ReportsViewSet(viewsets.ViewSet):
                         mod_status = "NOT STARTED"
                         not_start_count += 1
 
-                    score_disp = f"{int(latest_score) if latest_score.is_integer() else latest_score}/{int(tot_possible) if tot_possible.is_integer() else tot_possible}" if latest_score is not None else "—"
-                    best_score_disp = f"{int(best_score) if best_score.is_integer() else best_score}/{int(tot_possible) if tot_possible.is_integer() else tot_possible}" if best_score is not None else "—"
+                    score_disp = f"{int(latest_score) if latest_score.is_integer() else latest_score}/{int(tot_possible) if tot_possible.is_integer() else tot_possible}" if latest_score is not None else "â€”"
+                    best_score_disp = f"{int(best_score) if best_score.is_integer() else best_score}/{int(best_tot_possible) if best_tot_possible.is_integer() else best_tot_possible}" if best_score is not None else "â€”"
                     last_attempt_time = latest_att.completed_at or latest_att.started_at if latest_att else None
 
                     ar_list.append({
@@ -6675,8 +6843,8 @@ class ReportsViewSet(viewsets.ViewSet):
                     else:
                         mod_status = "NOT STARTED"
                         not_start_count += 1
-                    res = "—"
-                    score_disp = "—"
+                    res = "â€”"
+                    score_disp = "â€”"
 
                 modules_prog_list.append({
                     "module_id": m.id,
@@ -6738,7 +6906,7 @@ class TrainingFileViewSet(viewsets.ModelViewSet):
     """
     serializer_class = TrainingFileSerializer
     permission_classes = [IsAuthenticated, IsLMSAdmin]
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     http_method_names = ["get", "post", "delete", "head", "options"]
 
     def get_queryset(self):
@@ -6775,10 +6943,13 @@ class TrainingFileViewSet(viewsets.ModelViewSet):
 
         created_files = []
         skipped_duplicates = []
+        ignored_metadata_files = []
         failed_files = []
 
         for idx, file_obj in enumerate(uploaded_files):
             orig_name = file_obj.name
+            file_size = getattr(file_obj, "size", 0)
+            raw_rel = orig_name
             try:
                 # 1. Determine relative path
                 if rel_paths and idx < len(rel_paths):
@@ -6791,6 +6962,17 @@ class TrainingFileViewSet(viewsets.ModelViewSet):
                 # Sanitize relative path to prevent directory traversal
                 clean_rel_path = sanitize_relative_path(raw_rel)
                 clean_filename = os.path.basename(clean_rel_path) or orig_name
+
+                # 1b. Check if file is operating-system metadata (desktop.ini, Thumbs.db, .DS_Store, ._*)
+                if is_os_metadata_file(clean_rel_path) or is_os_metadata_file(orig_name):
+                    ignored_metadata_files.append({
+                        "filename": clean_filename,
+                        "original_filename": orig_name,
+                        "relative_path": clean_rel_path,
+                        "file_size": file_size,
+                        "reason": "Operating-system metadata file automatically excluded from training materials.",
+                    })
+                    continue
 
                 # 2. Validate file size and extension
                 validate_learning_material_file(file_obj)
@@ -6810,11 +6992,21 @@ class TrainingFileViewSet(viewsets.ModelViewSet):
                 ).first()
 
                 if existing:
+                    dup_reason = (
+                        f"Duplicate file already exists: Exact identical content already exists (ID #{existing.id}, '{existing.filename}')."
+                        if existing.checksum == file_checksum
+                        else f"Duplicate file already exists: A file at identical path already exists (ID #{existing.id}, '{existing.relative_path}')."
+                    )
                     skipped_duplicates.append({
                         "filename": clean_filename,
+                        "original_filename": orig_name,
                         "relative_path": clean_rel_path,
-                        "reason": f"Duplicate file already exists (ID: {existing.id}, Path: '{existing.relative_path}')",
+                        "file_size": file_size,
+                        "reason": dup_reason,
                         "existing_id": existing.id,
+                        "existing_filename": existing.filename,
+                        "existing_relative_path": existing.relative_path,
+                        "checksum": file_checksum,
                     })
                     continue
 
@@ -6828,32 +7020,56 @@ class TrainingFileViewSet(viewsets.ModelViewSet):
                     filename=clean_filename,
                     relative_path=clean_rel_path,
                     file_type=file_type,
-                    file_size=file_obj.size,
+                    file_size=file_size,
                     checksum=file_checksum,
                     uploaded_by=request.user,
                 )
 
-                created_files.append(TrainingFileSerializer(tf, context={"request": request}).data)
+                created_item = TrainingFileSerializer(tf, context={"request": request}).data
+                created_item["original_filename"] = orig_name
+                created_item["file_size"] = file_size
+                created_files.append(created_item)
 
             except ValidationError as ve:
+                err_msg = str(ve.message if hasattr(ve, "message") else ve)
+                category = "VALIDATION"
+                if "size exceeds" in err_msg.lower():
+                    category = "FILE_SIZE_LIMIT"
+                elif "unsupported file extension" in err_msg.lower():
+                    category = "UNSUPPORTED_FORMAT"
+
                 failed_files.append({
                     "filename": orig_name,
-                    "error": str(ve.message if hasattr(ve, "message") else ve),
+                    "original_filename": orig_name,
+                    "relative_path": raw_rel,
+                    "file_size": file_size,
+                    "error": err_msg,
+                    "category": category,
+                    "retry_eligible": category != "UNSUPPORTED_FORMAT",
                 })
             except Exception as e:
+                err_msg = str(e)
+                category = "STORAGE_ERROR" if "storage" in err_msg.lower() or "permission" in err_msg.lower() else "SYSTEM_ERROR"
                 failed_files.append({
                     "filename": orig_name,
-                    "error": str(e),
+                    "original_filename": orig_name,
+                    "relative_path": raw_rel,
+                    "file_size": file_size,
+                    "error": err_msg or "Internal server error occurred while processing this file.",
+                    "category": category,
+                    "retry_eligible": True,
                 })
 
         return Response({
-            "message": f"Processed {len(uploaded_files)} file(s). Uploaded: {len(created_files)}, Skipped: {len(skipped_duplicates)}, Failed: {len(failed_files)}.",
+            "message": f"Processed {len(uploaded_files)} file(s). Uploaded: {len(created_files)}, Skipped: {len(skipped_duplicates)}, Ignored: {len(ignored_metadata_files)}, Failed: {len(failed_files)}.",
             "total_processed": len(uploaded_files),
             "created_count": len(created_files),
             "skipped_count": len(skipped_duplicates),
+            "ignored_count": len(ignored_metadata_files),
             "failed_count": len(failed_files),
             "created": created_files,
             "skipped": skipped_duplicates,
+            "ignored": ignored_metadata_files,
             "failed": failed_files,
         }, status=status.HTTP_201_CREATED if created_files else status.HTTP_200_OK)
 
@@ -6932,6 +7148,43 @@ class TrainingFileViewSet(viewsets.ModelViewSet):
                 return Response(
                     {
                         "error": "Failed to generate read-only document preview.",
+                        "filename": training_file.filename,
+                        "file_type": training_file.file_type,
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+        # Check if file is PPT / PPTX for read-only preview conversion
+        is_pptx = (
+            (training_file.file_type and training_file.file_type.upper() in ["PPTX", "PPT", "POWERPOINT"])
+            or training_file.filename.lower().endswith((".pptx", ".ppt"))
+            or content_type in [
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "application/vnd.ms-powerpoint",
+            ]
+        )
+
+        if is_pptx:
+            from core.document_preview import get_or_create_presentation_preview
+            try:
+                preview_pdf_path = get_or_create_presentation_preview(training_file)
+                preview_file_size = os.path.getsize(preview_pdf_path)
+                preview_filename = os.path.splitext(training_file.filename)[0] + ".pdf"
+                response = FileResponse(
+                    open(preview_pdf_path, "rb"),
+                    content_type="application/pdf",
+                )
+                response["Content-Disposition"] = f'inline; filename="{preview_filename}"'
+                response["Content-Length"] = preview_file_size
+                response["Cache-Control"] = "private, no-cache, no-store, must-revalidate"
+                response["X-Content-Type-Options"] = "nosniff"
+                response["X-Frame-Options"] = "SAMEORIGIN"
+                return response
+            except Exception as e:
+                logger.error("PowerPoint preview generation error for admin training file %s: %s", training_file.id, e)
+                return Response(
+                    {
+                        "error": "Failed to generate read-only presentation preview.",
                         "filename": training_file.filename,
                         "file_type": training_file.file_type,
                     },
@@ -7033,6 +7286,130 @@ class TrainingFileViewSet(viewsets.ModelViewSet):
                 {"error": f"Failed to delete training file: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+    @action(detail=False, methods=["post"], url_path="bulk-delete")
+    def bulk_destroy(self, request):
+        """
+        Bulk deletion of selected TrainingFile records by LMS Administrators:
+        - Validates a list of file IDs.
+        - Checks which files exist, handles missing IDs safely.
+        - Deletes associated TrainingFileMapping records and logs individual audit records.
+        - Cleans up disk storage for successfully deleted records.
+        - Returns a detailed per-file breakdown and reconciled summary.
+        """
+        raw_ids = request.data.get("ids") or request.data.get("file_ids")
+        if not raw_ids or not isinstance(raw_ids, list):
+            return Response(
+                {"error": "A list of training file 'ids' is required for bulk deletion."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Sanitize and deduplicate integer IDs
+        valid_ids = []
+        for item in raw_ids:
+            try:
+                valid_ids.append(int(item))
+            except (ValueError, TypeError):
+                continue
+        valid_ids = list(dict.fromkeys(valid_ids))  # preserve order without duplicates
+
+        if not valid_ids:
+            return Response(
+                {"error": "No valid numeric training file IDs provided."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Query existing files
+        existing_files = list(TrainingFile.objects.filter(id__in=valid_ids).prefetch_related(
+            "curriculum_mappings__cluster", "curriculum_mappings__module", "curriculum_mappings__submodule"
+        ))
+        existing_map = {f.id: f for f in existing_files}
+
+        deleted_records = []
+        failed_records = []
+        not_found_ids = [fid for fid in valid_ids if fid not in existing_map]
+
+        total_mappings_removed = 0
+
+        for fid in valid_ids:
+            if fid not in existing_map:
+                continue
+
+            tf = existing_map[fid]
+            file_storage_name = tf.file.name if tf.file else None
+            filename = tf.filename
+            file_size = tf.file_size
+            file_type = tf.file_type
+            relative_path = tf.relative_path
+
+            mappings_qs = tf.curriculum_mappings.all()
+            mappings_count = len(mappings_qs)
+            affected_mappings_info = [
+                {
+                    "mapping_id": m.id,
+                    "cluster": m.cluster.name if m.cluster else None,
+                    "module": m.module.name if m.module else None,
+                    "submodule": m.submodule.name if m.submodule else None,
+                }
+                for m in mappings_qs
+            ]
+
+            try:
+                with transaction.atomic():
+                    _log_audit(
+                        request,
+                        AuditAction.DELETE,
+                        "TrainingFile",
+                        fid,
+                        {
+                            "filename": filename,
+                            "relative_path": relative_path,
+                            "file_type": file_type,
+                            "file_size": file_size,
+                            "mappings_removed": mappings_count,
+                            "affected_mappings": affected_mappings_info,
+                            "operation": "bulk_delete",
+                        },
+                    )
+                    tf.delete()
+
+                # Physical storage cleanup
+                if file_storage_name:
+                    try:
+                        if tf.file.storage.exists(file_storage_name):
+                            tf.file.storage.delete(file_storage_name)
+                    except Exception as s_err:
+                        logger.warning(
+                            "Bulk delete storage cleanup failed for file %s ('%s'): %s",
+                            fid, file_storage_name, str(s_err)
+                        )
+
+                deleted_records.append({
+                    "id": fid,
+                    "filename": filename,
+                    "mappings_removed": mappings_count,
+                })
+                total_mappings_removed += mappings_count
+
+            except Exception as d_err:
+                logger.exception("Bulk delete failed on file %s: %s", fid, str(d_err))
+                failed_records.append({
+                    "id": fid,
+                    "filename": filename,
+                    "error": str(d_err),
+                })
+
+        return Response({
+            "message": f"Bulk deletion completed. Deleted: {len(deleted_records)}, Failed: {len(failed_records)}, Not Found: {len(not_found_ids)}.",
+            "total_requested": len(valid_ids),
+            "deleted_count": len(deleted_records),
+            "failed_count": len(failed_records),
+            "not_found_count": len(not_found_ids),
+            "total_mappings_removed": total_mappings_removed,
+            "deleted": deleted_records,
+            "failed": failed_records,
+            "not_found": not_found_ids,
+        }, status=status.HTTP_200_OK)
 
 
 class TrainingClusterViewSet(viewsets.ModelViewSet):

@@ -38,9 +38,13 @@ export default function CourseCurriculumView({
   onMappingDeleted,
   onOpenPreviewCourseModal,
   getStatusBadge,
+  selectedLevel = null,
+  onSelectLevel = null,
 }) {
-  const [selectedLevelFilter, setSelectedLevelFilter] = useState("ALL");
-  const [levelCardSelection, setLevelCardSelection] = useState(null); // Level card drill-down state (matches Learner Portal)
+  const [selectedLevelFilter, setSelectedLevelFilter] = useState(
+    selectedLevel?.id ? String(selectedLevel.id) : "ALL"
+  );
+  const [levelCardSelection, setLevelCardSelection] = useState(selectedLevel || null); // Level card drill-down state (matches Learner Portal)
 
   // Filter modules for this course
   const courseModules = selectedCourse
@@ -84,7 +88,6 @@ export default function CourseCurriculumView({
           >
             <div>
               <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
-                <span className="badge badge-purple">Module #{activeModule.id}</span>
                 {getStatusBadge(activeModule.status)}
               </div>
               <h3 style={{ margin: 0, fontSize: "18px" }}>{activeModule.name}</h3>
@@ -430,6 +433,7 @@ export default function CourseCurriculumView({
                 onClick={() => {
                   setSelectedLevelFilter("ALL");
                   setLevelCardSelection(null);
+                  if (onSelectLevel) onSelectLevel(null);
                 }}
                 role="button"
                 tabIndex={0}
@@ -468,6 +472,7 @@ export default function CourseCurriculumView({
                     onClick={() => {
                       setSelectedLevelFilter(String(lvl.id));
                       setLevelCardSelection(lvl);
+                      if (onSelectLevel) onSelectLevel(lvl);
                     }}
                     role="button"
                     tabIndex={0}
