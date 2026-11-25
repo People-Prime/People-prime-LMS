@@ -1541,6 +1541,10 @@ export default function AdminCurriculumTab({ initialWorkspaceTab = null, onWorks
               onMappingDeleted={handleMappingDeleted}
               onOpenPreviewCourseModal={handleOpenPreviewCourseModal}
               getStatusBadge={getStatusBadge}
+              onQuestionsSaved={async (moduleId) => {
+                await loadModuleDetails(moduleId);
+                setSuccessMessage("AI-generated questions approved and added to assessment gate successfully.");
+              }}
             />
           )}
 

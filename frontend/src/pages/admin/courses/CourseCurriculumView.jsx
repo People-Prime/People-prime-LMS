@@ -1,6 +1,7 @@
 import { useState } from "react";
 import LessonMaterialsPanel from "./LessonMaterialsPanel";
 import ActionMenu from "../../../components/common/ActionMenu";
+import AIQuestionGeneratorModal from "./AIQuestionGeneratorModal";
 
 export default function CourseCurriculumView({
   selectedCourse,
@@ -40,7 +41,9 @@ export default function CourseCurriculumView({
   getStatusBadge,
   selectedLevel = null,
   onSelectLevel = null,
+  onQuestionsSaved = null,
 }) {
+  const [showAIGeneratorModal, setShowAIGeneratorModal] = useState(false);
   const [selectedLevelFilter, setSelectedLevelFilter] = useState(
     selectedLevel?.id ? String(selectedLevel.id) : "ALL"
   );
@@ -121,14 +124,32 @@ export default function CourseCurriculumView({
                 </button>
               )}
               {moduleSubTab === "questions" && (
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={onOpenCreateQuestionModal}
-                  style={{ padding: "6px 12px", fontSize: "12px" }}
-                >
-                  + Add Required Question
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => setShowAIGeneratorModal(true)}
+                    style={{
+                      padding: "6px 12px",
+                      fontSize: "12px",
+                      backgroundColor: "rgba(99, 102, 241, 0.08)",
+                      borderColor: "#6366f1",
+                      color: "#4f46e5",
+                      fontWeight: "600",
+                    }}
+                    title="Generate multiple-choice questions automatically from attached materials using Gemini AI"
+                  >
+                    ✨ AI Question Generator
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={onOpenCreateQuestionModal}
+                    style={{ padding: "6px 12px", fontSize: "12px" }}
+                  >
+                    + Add Required Question
+                  </button>
+                </>
               )}
               <button
                 type="button"
@@ -774,6 +795,16 @@ export default function CourseCurriculumView({
             )}
           </div>
         </div>
+      )}
+
+      {/* AI Question Generator Modal */}
+      {showAIGeneratorModal && activeModule && (
+        <AIQuestionGeneratorModal
+          isOpen={showAIGeneratorModal}
+          onClose={() => setShowAIGeneratorModal(false)}
+          module={activeModule}
+          onQuestionsSaved={onQuestionsSaved}
+        />
       )}
     </div>
   );

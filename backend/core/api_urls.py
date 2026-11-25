@@ -41,6 +41,12 @@ from core.api_views import (
     ProjectSubmissionViewSet,
 )
 
+from core.ai_question_views import (
+    AdminAIQuestionMaterialsView,
+    AdminAIGenerateQuestionsView,
+    AdminAIApproveQuestionsView,
+)
+
 router = DefaultRouter()
 router.register(r"projects", ProjectViewSet, basename="project")
 router.register(r"project-submissions", ProjectSubmissionViewSet, basename="project-submission")
@@ -67,5 +73,8 @@ router.register(r"admin/training-clusters", TrainingClusterViewSet, basename="ad
 router.register(r"admin/training-file-mappings", TrainingFileMappingViewSet, basename="admin-training-file-mappings")
 
 urlpatterns = [
+    path("admin/ai-question-generator/materials/", AdminAIQuestionMaterialsView.as_view(), name="admin-ai-question-materials"),
+    path("admin/ai-question-generator/generate/", AdminAIGenerateQuestionsView.as_view(), name="admin-ai-question-generate"),
+    path("admin/ai-question-generator/approve/", AdminAIApproveQuestionsView.as_view(), name="admin-ai-question-approve"),
     path("", include(router.urls)),
 ]
