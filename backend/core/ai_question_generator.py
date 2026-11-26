@@ -27,6 +27,7 @@ from django.conf import settings
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
+from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +320,7 @@ def call_gemini_api(
     model_name: str,
     prompt: str,
     timeout_seconds: int = 45,
-    max_retries: int = 2,
+    max_retries: int = 0,
 ) -> str:
     """
     Invokes the Google Gemini API using google-genai SDK.
@@ -354,6 +355,12 @@ def call_gemini_api(
             except APIError as e:
                 last_error = e
                 logger.warning("Gemini API error on attempt %d: %s", attempt + 1, e)
+                # Do not retry HTTP 429 / RESOURCE_EXHAUSTED quota errors to avoid wasting requests
+                err_code = getattr(e, "code", None)
+                err_msg = str(e)
+                if err_code == 429 or "RESOURCE_EXHAUSTED" in err_msg or "429" in err_msg:
+                    logger.warning("Gemini quota exhausted (429/RESOURCE_EXHAUSTED). Aborting retries immediately.")
+                    break
                 if attempt < max_retries:
                     time.sleep(1.0 * (attempt + 1))
                 else:
@@ -361,6 +368,10 @@ def call_gemini_api(
             except Exception as e:
                 last_error = e
                 logger.warning("Unexpected error during Gemini call on attempt %d: %s", attempt + 1, e)
+                err_str = str(e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                    logger.warning("Quota-related error detected in unexpected exception. Aborting retries.")
+                    break
                 if attempt < max_retries:
                     time.sleep(1.0 * (attempt + 1))
                 else:
@@ -375,6 +386,62 @@ def call_gemini_api(
             pass
 
 
+def call_groq_api(
+    api_key: str,
+    model_name: str,
+    prompt: str,
+    timeout_seconds: int = 45,
+) -> str:
+    """
+    Invokes Groq using its OpenAI-compatible API.
+    Makes a single request without automatic retries (max_retries=0).
+    Never logs the prompt or API key.
+    Closes the client reliably in a finally block.
+    """
+    client = OpenAI(
+        api_key=api_key,
+        base_url="https://api.groq.com/openai/v1",
+        timeout=timeout_seconds,
+        max_retries=0,
+    )
+
+    try:
+        logger.info("Calling Groq API with model %s (timeout=%ss)", model_name, timeout_seconds)
+
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            max_completion_tokens=4096,
+        )
+
+        if not response or not getattr(response, "choices", None):
+            raise RuntimeError("Groq returned an empty response.")
+
+        content = response.choices[0].message.content
+
+        if not content or not content.strip():
+            raise RuntimeError("Groq returned an empty response.")
+
+        return content
+
+    except RuntimeError:
+        raise
+    except Exception as e:
+        logger.error(
+            "Groq API request failed: %s",
+            type(e).__name__,
+        )
+        raise RuntimeError(
+            "Groq AI service was temporarily unavailable or timed out."
+        ) from e
+
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
 def validate_and_sanitize_generated_questions(
     raw_response_text: str,
     expected_count: int,
