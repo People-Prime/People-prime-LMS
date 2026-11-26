@@ -27,6 +27,7 @@ from core.ai_question_generator import (
     extract_text_from_file_stream,
     build_gemini_generation_prompt,
     call_gemini_api,
+    call_groq_api,
     validate_and_sanitize_generated_questions,
     ExtractionError,
     GenerationValidationError,
@@ -186,15 +187,32 @@ class AdminAIGenerateQuestionsView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 2. Check API environment configuration
-        api_key = os.getenv("GEMINI_API_KEY") or getattr(settings, "GEMINI_API_KEY", None)
-        model_name = os.getenv("GEMINI_TEXT_MODEL") or getattr(settings, "GEMINI_TEXT_MODEL", "gemini-3.5-flash")
+        # 2. Check AI Provider and API environment configuration
+        raw_provider = os.getenv("AI_PROVIDER") or getattr(settings, "AI_PROVIDER", "gemini")
+        provider = (raw_provider or "gemini").strip().lower()
 
-        if not api_key:
+        if provider not in ("gemini", "groq"):
             return Response(
-                {"error": "Gemini API key is not configured in the environment settings (GEMINI_API_KEY)."},
+                {"error": f"Unsupported AI provider '{provider}'. Supported providers: gemini, groq."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+        if provider == "groq":
+            api_key = os.getenv("GROQ_API_KEY") or getattr(settings, "GROQ_API_KEY", None)
+            model_name = os.getenv("GROQ_TEXT_MODEL") or getattr(settings, "GROQ_TEXT_MODEL", "openai/gpt-oss-120b")
+            if not api_key:
+                return Response(
+                    {"error": "Groq API key is not configured in the environment settings (GROQ_API_KEY)."},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+        else:
+            api_key = os.getenv("GEMINI_API_KEY") or getattr(settings, "GEMINI_API_KEY", None)
+            model_name = os.getenv("GEMINI_TEXT_MODEL") or getattr(settings, "GEMINI_TEXT_MODEL", "gemini-3.5-flash")
+            if not api_key:
+                return Response(
+                    {"error": "Gemini API key is not configured in the environment settings (GEMINI_API_KEY)."},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
 
         # 3. Retrieve and validate selected training file mappings
         allowed_mappings = list(
@@ -309,7 +327,7 @@ class AdminAIGenerateQuestionsView(APIView):
             ModuleQuestion.objects.filter(module=module, is_active=True).values_list("question_text", flat=True)
         )
 
-        # 6. Build prompt and invoke Gemini API
+        # 6. Build prompt and invoke selected AI provider
         prompt = build_gemini_generation_prompt(
             module_title=module.name,
             combined_content=combined_content,
@@ -318,15 +336,23 @@ class AdminAIGenerateQuestionsView(APIView):
         )
 
         try:
-            raw_ai_response = call_gemini_api(
-                api_key=api_key,
-                model_name=model_name,
-                prompt=prompt,
-                timeout_seconds=45,
-                max_retries=2,
-            )
+            if provider == "groq":
+                raw_ai_response = call_groq_api(
+                    api_key=api_key,
+                    model_name=model_name,
+                    prompt=prompt,
+                    timeout_seconds=45,
+                )
+            else:
+                raw_ai_response = call_gemini_api(
+                    api_key=api_key,
+                    model_name=model_name,
+                    prompt=prompt,
+                    timeout_seconds=45,
+                    max_retries=2,
+                )
         except Exception as e:
-            logger.error("Gemini question generation error for module %s: %s", module.id, e)
+            logger.error("%s question generation error for module %s: %s", provider.capitalize(), module.id, e)
             return Response(
                 {"error": "AI question generation service was temporarily unavailable. Please try again."},
                 status=status.HTTP_502_BAD_GATEWAY,

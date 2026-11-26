@@ -56,6 +56,7 @@ from core.ai_question_generator import (
     validate_and_sanitize_generated_questions,
     build_gemini_generation_prompt,
     call_gemini_api,
+    call_groq_api,
     ExtractionError,
     GenerationValidationError,
     MAX_DOCUMENT_FILE_SIZE,
@@ -421,6 +422,173 @@ class AIQuestionGeneratorTests(TestCase):
         self.assertIsInstance(kwargs_60["http_options"].timeout, int)
         mock_instance.close.assert_called_once()
 
+    @patch("google.genai.Client")
+    def test_gemini_quota_error_not_retried(self, mock_client_cls):
+        """Gemini 429 / RESOURCE_EXHAUSTED errors are not retried to prevent quota waste."""
+        from google.genai.errors import APIError
+        mock_instance = MagicMock()
+        mock_client_cls.return_value = mock_instance
+        # Simulate 429 quota error
+        quota_err = APIError(429, {"error": {"message": "RESOURCE_EXHAUSTED", "status": "RESOURCE_EXHAUSTED"}})
+        mock_instance.models.generate_content.side_effect = quota_err
+
+        with self.assertRaises(RuntimeError):
+            call_gemini_api("fake_key", "gemini-3.5-flash", "test prompt", max_retries=2)
+
+        # Must only call once (no retries)
+        self.assertEqual(mock_instance.models.generate_content.call_count, 1)
+        mock_instance.close.assert_called_once()
+
+    @patch("core.ai_question_generator.OpenAI")
+    def test_call_groq_api_success(self, mock_openai_cls):
+        """Groq API uses OpenAI SDK with correct base_url, model, max_retries=0 and closes client."""
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_resp = MagicMock()
+        mock_choice = MagicMock()
+        mock_choice.message.content = '{"questions": []}'
+        mock_resp.choices = [mock_choice]
+        mock_client.chat.completions.create.return_value = mock_resp
+
+        result = call_groq_api(
+            api_key="fake_groq_key",
+            model_name="openai/gpt-oss-120b",
+            prompt="Generate questions",
+            timeout_seconds=30,
+        )
+
+        self.assertEqual(result, '{"questions": []}')
+        # Assert client initialization parameters
+        mock_openai_cls.assert_called_once_with(
+            api_key="fake_groq_key",
+            base_url="https://api.groq.com/openai/v1",
+            timeout=30,
+            max_retries=0,
+        )
+        # Assert chat.completions.create call arguments - does not force json_object mode
+        mock_client.chat.completions.create.assert_called_once_with(
+            model="openai/gpt-oss-120b",
+            messages=[{"role": "user", "content": "Generate questions"}],
+            max_completion_tokens=4096,
+        )
+        call_kwargs = mock_client.chat.completions.create.call_args[1]
+        self.assertNotIn("response_format", call_kwargs)
+        mock_client.close.assert_called_once()
+
+    @patch("core.ai_question_generator.OpenAI")
+    def test_call_groq_api_empty_response(self, mock_openai_cls):
+        """Groq empty response raises RuntimeError safely."""
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_resp = MagicMock()
+        mock_choice = MagicMock()
+        mock_choice.message.content = ""
+        mock_resp.choices = [mock_choice]
+        mock_client.chat.completions.create.return_value = mock_resp
+
+        with self.assertRaises(RuntimeError) as ctx:
+            call_groq_api("fake_key", "model", "prompt")
+        self.assertIn("Groq returned an empty response", str(ctx.exception))
+        mock_client.close.assert_called_once()
+
+    @patch("core.ai_question_generator.OpenAI")
+    def test_call_groq_api_error_not_retried(self, mock_openai_cls):
+        """Groq API error raises RuntimeError and is not retried."""
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_client.chat.completions.create.side_effect = Exception("Rate limit reached")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            call_groq_api("fake_key", "model", "prompt")
+        self.assertIn("Groq AI service was temporarily unavailable or timed out", str(ctx.exception))
+        self.assertEqual(mock_client.chat.completions.create.call_count, 1)
+        mock_client.close.assert_called_once()
+
+    # =========================================================================
+    # DUAL-PROVIDER SELECTION & VIEW TESTS
+    # =========================================================================
+
+    @patch("core.ai_question_views.call_groq_api")
+    def test_generate_endpoint_with_groq_provider(self, mock_groq):
+        """Endpoint routes to call_groq_api when AI_PROVIDER=groq without needing GEMINI_API_KEY."""
+        mock_groq.return_value = json.dumps([
+            {
+                "question_type": "MULTIPLE_CHOICE",
+                "question_text": "What is the primary objective of strategy?",
+                "options": [
+                    {"id": "opt_1", "text": "Competitive advantage", "is_correct": True},
+                    {"id": "opt_2", "text": "Random guessing", "is_correct": False},
+                    {"id": "opt_3", "text": "Short-term chaos", "is_correct": False},
+                    {"id": "opt_4", "text": "Ignoring facts", "is_correct": False},
+                ]
+            }
+        ])
+
+        self.client.force_authenticate(user=self.admin)
+        with patch.dict("os.environ", {
+            "AI_PROVIDER": "groq",
+            "GROQ_API_KEY": "test_groq_key",
+            "GROQ_TEXT_MODEL": "openai/gpt-oss-120b",
+        }, clear=True):
+            res = self.client.post("/api/admin/ai-question-generator/generate/", {
+                "module_id": self.module.id,
+                "mapping_ids": [self.map_docx.id],
+                "question_count": 1,
+            }, format="json")
+
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+            self.assertEqual(res.data["generated_count"], 1)
+            mock_groq.assert_called_once()
+            _, kwargs = mock_groq.call_args
+            self.assertEqual(kwargs["api_key"], "test_groq_key")
+            self.assertEqual(kwargs["model_name"], "openai/gpt-oss-120b")
+
+    def test_generate_endpoint_missing_groq_api_key(self):
+        """When AI_PROVIDER=groq and GROQ_API_KEY is missing, returns clear 500 error."""
+        self.client.force_authenticate(user=self.admin)
+        with patch.dict("os.environ", {
+            "AI_PROVIDER": "groq",
+            "GEMINI_API_KEY": "some_gemini_key",
+        }, clear=True):
+            res = self.client.post("/api/admin/ai-question-generator/generate/", {
+                "module_id": self.module.id,
+                "mapping_ids": [self.map_docx.id],
+                "question_count": 1,
+            }, format="json")
+            self.assertEqual(res.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+            self.assertIn("Groq API key is not configured", res.data["error"])
+
+    def test_generate_endpoint_missing_gemini_api_key_when_gemini_selected(self):
+        """When AI_PROVIDER=gemini and GEMINI_API_KEY is missing, returns clear 500 error even if GROQ_API_KEY is set."""
+        self.client.force_authenticate(user=self.admin)
+        with patch.dict("os.environ", {
+            "AI_PROVIDER": "gemini",
+            "GROQ_API_KEY": "some_groq_key",
+        }, clear=True):
+            res = self.client.post("/api/admin/ai-question-generator/generate/", {
+                "module_id": self.module.id,
+                "mapping_ids": [self.map_docx.id],
+                "question_count": 1,
+            }, format="json")
+            self.assertEqual(res.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+            self.assertIn("Gemini API key is not configured", res.data["error"])
+
+    def test_generate_endpoint_unsupported_provider(self):
+        """Unsupported provider returns clear 500 configuration error."""
+        self.client.force_authenticate(user=self.admin)
+        with patch.dict("os.environ", {
+            "AI_PROVIDER": "anthropic",
+            "GEMINI_API_KEY": "some_gemini_key",
+            "GROQ_API_KEY": "some_groq_key",
+        }, clear=True):
+            res = self.client.post("/api/admin/ai-question-generator/generate/", {
+                "module_id": self.module.id,
+                "mapping_ids": [self.map_docx.id],
+                "question_count": 1,
+            }, format="json")
+            self.assertEqual(res.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+            self.assertIn("Unsupported AI provider 'anthropic'", res.data["error"])
+
     # =========================================================================
     # AI OUTPUT VALIDATION & ZERO-INSERTION TESTS
     # =========================================================================
@@ -496,18 +664,24 @@ class AIQuestionGeneratorTests(TestCase):
         ])
 
         self.client.force_authenticate(user=self.admin)
-        res = self.client.post("/api/admin/ai-question-generator/generate/", {
-            "module_id": self.module.id,
-            "mapping_ids": [self.map_docx.id, self.map_pdf.id],
-            "question_count": 2,
-        }, format="json")
+        with patch.dict("os.environ", {
+            "AI_PROVIDER": "gemini",
+            "GEMINI_API_KEY": "fake_gemini_key",
+            "GEMINI_TEXT_MODEL": "gemini-3.5-flash",
+        }, clear=True):
+            res = self.client.post("/api/admin/ai-question-generator/generate/", {
+                "module_id": self.module.id,
+                "mapping_ids": [self.map_docx.id, self.map_pdf.id],
+                "question_count": 2,
+            }, format="json")
 
-        self.assertEqual(res.status_code, status.HTTP_200_OK)
-        self.assertEqual(res.data["module_id"], self.module.id)
-        self.assertEqual(res.data["requested_count"], 2)
-        self.assertEqual(res.data["generated_count"], 2)
-        self.assertEqual(len(res.data["questions"]), 2)
-        self.assertEqual(len(res.data["source_documents"]), 2)
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+            self.assertEqual(res.data["module_id"], self.module.id)
+            self.assertEqual(res.data["requested_count"], 2)
+            self.assertEqual(res.data["generated_count"], 2)
+            self.assertEqual(len(res.data["questions"]), 2)
+            self.assertEqual(len(res.data["source_documents"]), 2)
+            mock_gemini.assert_called_once()
 
         # STRICT ASSERTION: Absolutely no ModuleQuestion was saved to database
         self.assertEqual(ModuleQuestion.objects.count(), initial_question_count)
@@ -516,15 +690,59 @@ class AIQuestionGeneratorTests(TestCase):
     def test_gemini_api_failure_returns_safe_502(self, mock_gemini):
         """Gemini network/API failures return safe 502 without leaking provider/system internals."""
         self.client.force_authenticate(user=self.admin)
-        res = self.client.post("/api/admin/ai-question-generator/generate/", {
-            "module_id": self.module.id,
-            "mapping_ids": [self.map_docx.id],
-            "question_count": 2,
-        }, format="json")
-        self.assertEqual(res.status_code, status.HTTP_502_BAD_GATEWAY)
-        self.assertEqual(res.data["error"], "AI question generation service was temporarily unavailable. Please try again.")
-        self.assertNotIn("socket", res.data["error"])
-        self.assertNotIn("/var/run", res.data["error"])
+        with patch.dict("os.environ", {
+            "AI_PROVIDER": "gemini",
+            "GEMINI_API_KEY": "fake_gemini_key",
+            "GEMINI_TEXT_MODEL": "gemini-3.5-flash",
+        }, clear=True):
+            res = self.client.post("/api/admin/ai-question-generator/generate/", {
+                "module_id": self.module.id,
+                "mapping_ids": [self.map_docx.id],
+                "question_count": 2,
+            }, format="json")
+            self.assertEqual(res.status_code, status.HTTP_502_BAD_GATEWAY)
+            self.assertEqual(res.data["error"], "AI question generation service was temporarily unavailable. Please try again.")
+            self.assertNotIn("socket", res.data["error"])
+            self.assertNotIn("/var/run", res.data["error"])
+            mock_gemini.assert_called_once()
+
+    @patch("core.ai_question_views.call_groq_api")
+    @patch("core.ai_question_views.call_gemini_api")
+    def test_gemini_test_isolation_when_env_has_groq(self, mock_gemini, mock_groq):
+        """
+        Regression test: When the external environment has AI_PROVIDER=groq,
+        explicitly configuring AI_PROVIDER=gemini guarantees call_gemini_api is invoked
+        and call_groq_api is NEVER touched.
+        """
+        mock_gemini.return_value = json.dumps([
+            {
+                "question_type": "MULTIPLE_CHOICE",
+                "question_text": "Is Gemini properly isolated?",
+                "options": [
+                    {"id": "opt_1", "text": "Yes, completely isolated", "is_correct": True},
+                    {"id": "opt_2", "text": "No", "is_correct": False},
+                    {"id": "opt_3", "text": "Maybe", "is_correct": False},
+                    {"id": "opt_4", "text": "Unknown", "is_correct": False},
+                ]
+            }
+        ])
+
+        self.client.force_authenticate(user=self.admin)
+        with patch.dict("os.environ", {
+            "AI_PROVIDER": "gemini",
+            "GEMINI_API_KEY": "test_gemini_key",
+            "GEMINI_TEXT_MODEL": "gemini-3.5-flash",
+            "GROQ_API_KEY": "unwanted_groq_key",
+        }, clear=True):
+            res = self.client.post("/api/admin/ai-question-generator/generate/", {
+                "module_id": self.module.id,
+                "mapping_ids": [self.map_docx.id],
+                "question_count": 1,
+            }, format="json")
+
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+            mock_gemini.assert_called_once()
+            mock_groq.assert_not_called()
 
     # =========================================================================
     # APPROVAL AND ATOMIC PERSISTENCE TESTS
