@@ -320,7 +320,7 @@ def call_gemini_api(
     model_name: str,
     prompt: str,
     timeout_seconds: int = 45,
-    max_retries: int = 2,
+    max_retries: int = 0,
 ) -> str:
     """
     Invokes the Google Gemini API using google-genai SDK.

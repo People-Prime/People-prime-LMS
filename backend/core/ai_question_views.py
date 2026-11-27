@@ -187,7 +187,47 @@ class AdminAIGenerateQuestionsView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 2. Check AI Provider and API environment configuration
+        # 2. Retrieve and validate selected training file mappings (mapping ownership)
+        allowed_mappings = list(
+            TrainingFileMapping.objects.filter(
+                Q(module=module) | Q(submodule__module=module),
+                id__in=mapping_ids,
+            )
+            .select_related("training_file")
+        )
+
+        found_mapping_ids = {m.id for m in allowed_mappings}
+        invalid_ids = [m_id for m_id in mapping_ids if m_id not in found_mapping_ids]
+        if invalid_ids:
+            return Response(
+                {
+                    "error": f"The following mapping IDs do not belong to module '{module.name}' or its submodules: {invalid_ids}"
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not allowed_mappings:
+            return Response(
+                {"error": "No usable training materials found for the selected mapping IDs."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 3. Document-category eligibility validation
+        # Reject mappings that are not PRIMARY_INSTRUCTIONAL or SUPPLEMENTARY_REFERENCE
+        ineligible_mappings = [m for m in allowed_mappings if m.category not in ELIGIBLE_DOCUMENT_CATEGORIES]
+        if ineligible_mappings:
+            ineligible_desc = [f"ID {m.id} ({m.category})" for m in ineligible_mappings]
+            return Response(
+                {
+                    "error": (
+                        f"Only primary instructional and supplementary reference materials can be used for question generation. "
+                        f"Ineligible materials selected: {', '.join(ineligible_desc)}."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 4. Check AI Provider and API environment configuration
         raw_provider = os.getenv("AI_PROVIDER") or getattr(settings, "AI_PROVIDER", "gemini")
         provider = (raw_provider or "gemini").strip().lower()
 
@@ -214,46 +254,7 @@ class AdminAIGenerateQuestionsView(APIView):
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
 
-        # 3. Retrieve and validate selected training file mappings
-        allowed_mappings = list(
-            TrainingFileMapping.objects.filter(
-                Q(module=module) | Q(submodule__module=module),
-                id__in=mapping_ids,
-            )
-            .select_related("training_file")
-        )
-
-        found_mapping_ids = {m.id for m in allowed_mappings}
-        invalid_ids = [m_id for m_id in mapping_ids if m_id not in found_mapping_ids]
-        if invalid_ids:
-            return Response(
-                {
-                    "error": f"The following mapping IDs do not belong to module '{module.name}' or its submodules: {invalid_ids}"
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        if not allowed_mappings:
-            return Response(
-                {"error": "No usable training materials found for the selected mapping IDs."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # Category check: Reject mappings that are not PRIMARY_INSTRUCTIONAL or SUPPLEMENTARY_REFERENCE
-        ineligible_mappings = [m for m in allowed_mappings if m.category not in ELIGIBLE_DOCUMENT_CATEGORIES]
-        if ineligible_mappings:
-            ineligible_desc = [f"ID {m.id} ({m.category})" for m in ineligible_mappings]
-            return Response(
-                {
-                    "error": (
-                        f"Only primary instructional and supplementary reference materials can be used for question generation. "
-                        f"Ineligible materials selected: {', '.join(ineligible_desc)}."
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # 4. Extract text from selected documents with context limit tracking
+        # 5. Extract text from selected documents with context limit tracking
         extracted_sections = []
         processed_files = []
         total_extracted_len = 0
