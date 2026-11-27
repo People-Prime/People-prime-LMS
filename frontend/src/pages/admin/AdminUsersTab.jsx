@@ -33,6 +33,33 @@ export default function AdminUsersTab() {
   // Status Action (deactivate / activate)
   const [actionUserId, setActionUserId] = useState(null);
 
+  // Delete User Confirmation Modal
+  const [userToDelete, setUserToDelete] = useState(null);
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const [deleteError, setDeleteError] = useState(null);
+
+  // Edit User Modal
+  const [userToEdit, setUserToEdit] = useState(null);
+  const [editFormData, setEditFormData] = useState({
+    firstName: "",
+    lastName: "",
+    email: "",
+    username: "",
+    role: "LEARNER",
+    isActive: true,
+  });
+  const [editSubmitting, setEditSubmitting] = useState(false);
+  const [editError, setEditError] = useState(null);
+
+  // Reset Password Modal
+  const [userToResetPassword, setUserToResetPassword] = useState(null);
+  const [resetFormData, setResetFormData] = useState({
+    newPassword: "",
+    confirmPassword: "",
+  });
+  const [resetSubmitting, setResetSubmitting] = useState(false);
+  const [resetError, setResetError] = useState(null);
+
   const fetchUsers = useCallback(async () => {
     try {
       setLoading(true);
@@ -148,8 +175,13 @@ export default function AdminUsersTab() {
     setModalError(null);
 
     // Validation
-    if (!formData.email.trim()) {
+    const cleanEmail = formData.email.trim();
+    if (!cleanEmail) {
       setModalError("Email address is required.");
+      return;
+    }
+    if (!cleanEmail.toLowerCase().endsWith("@people-prime.com")) {
+      setModalError("Only corporate @people-prime.com email addresses are permitted.");
       return;
     }
     if (!formData.password) {
@@ -162,8 +194,8 @@ export default function AdminUsersTab() {
       const payload = {
         first_name: formData.firstName.trim(),
         last_name: formData.lastName.trim(),
-        email: formData.email.trim(),
-        username: formData.username.trim() || formData.email.trim(),
+        email: cleanEmail,
+        username: formData.username.trim() || cleanEmail,
         role: formData.role,
         password: formData.password,
         is_active: formData.isActive,
@@ -205,6 +237,155 @@ export default function AdminUsersTab() {
       setError(err.message || `Failed to ${action} user.`);
     } finally {
       setActionUserId(null);
+    }
+  };
+
+  const handleOpenDeleteModal = (user) => {
+    setUserToDelete(user);
+    setDeleteError(null);
+  };
+
+  const handleCloseDeleteModal = () => {
+    if (!deleteSubmitting) {
+      setUserToDelete(null);
+      setDeleteError(null);
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!userToDelete) return;
+    setDeleteSubmitting(true);
+    setDeleteError(null);
+    try {
+      const res = await apiClient(`/admin/users/${userToDelete.id}/`, {
+        method: "DELETE",
+      });
+      setSuccessMessage(res?.message || `User "${userToDelete.name || userToDelete.username}" was permanently deleted.`);
+      setUserToDelete(null);
+      fetchUsers();
+    } catch (err) {
+      setDeleteError(err.message || "Failed to delete user. Please resolve any conflicts and try again.");
+    } finally {
+      setDeleteSubmitting(false);
+    }
+  };
+
+  // Edit User Handlers
+  const handleOpenEditModal = (user) => {
+    setUserToEdit(user);
+    setEditFormData({
+      firstName: user.first_name || "",
+      lastName: user.last_name || "",
+      email: user.email || "",
+      username: user.username || "",
+      role: user.role || "LEARNER",
+      isActive: Boolean(user.is_active),
+    });
+    setEditError(null);
+  };
+
+  const handleCloseEditModal = () => {
+    if (!editSubmitting) {
+      setUserToEdit(null);
+      setEditError(null);
+    }
+  };
+
+  const handleEditSubmit = async (e) => {
+    e.preventDefault();
+    if (!userToEdit) return;
+    setEditError(null);
+
+    const cleanEmail = editFormData.email.trim().toLowerCase();
+    if (!cleanEmail) {
+      setEditError("Corporate email address is required.");
+      return;
+    }
+    if (!cleanEmail.endsWith("@people-prime.com")) {
+      setEditError("Only corporate @people-prime.com email addresses are permitted.");
+      return;
+    }
+    const cleanUsername = editFormData.username.trim();
+    if (!cleanUsername) {
+      setEditError("Username cannot be blank.");
+      return;
+    }
+
+    setEditSubmitting(true);
+    try {
+      const payload = {
+        first_name: editFormData.firstName.trim(),
+        last_name: editFormData.lastName.trim(),
+        email: cleanEmail,
+        username: cleanUsername,
+        role: editFormData.role,
+        is_active: editFormData.isActive,
+      };
+
+      await apiClient(`/admin/users/${userToEdit.id}/`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+
+      setSuccessMessage(`User "${cleanUsername}" was updated successfully.`);
+      setUserToEdit(null);
+      fetchUsers();
+    } catch (err) {
+      setEditError(err.message || "Failed to update user profile. Please check the information.");
+    } finally {
+      setEditSubmitting(false);
+    }
+  };
+
+  // Reset Password Handlers
+  const handleOpenResetModal = (user) => {
+    setUserToResetPassword(user);
+    setResetFormData({
+      newPassword: "",
+      confirmPassword: "",
+    });
+    setResetError(null);
+  };
+
+  const handleCloseResetModal = () => {
+    if (!resetSubmitting) {
+      setUserToResetPassword(null);
+      setResetError(null);
+    }
+  };
+
+  const handleResetSubmit = async (e) => {
+    e.preventDefault();
+    if (!userToResetPassword) return;
+    setResetError(null);
+
+    if (!resetFormData.newPassword) {
+      setResetError("New password is required.");
+      return;
+    }
+    if (resetFormData.newPassword !== resetFormData.confirmPassword) {
+      setResetError("Passwords do not match.");
+      return;
+    }
+
+    setResetSubmitting(true);
+    try {
+      const payload = {
+        new_password: resetFormData.newPassword,
+        confirm_password: resetFormData.confirmPassword,
+      };
+
+      const res = await apiClient(`/admin/users/${userToResetPassword.id}/reset-password/`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+
+      setSuccessMessage(res?.message || `Password for @${userToResetPassword.username} has been reset successfully.`);
+      setUserToResetPassword(null);
+    } catch (err) {
+      setResetError(err.message || "Failed to reset password. Please verify the password requirements.");
+    } finally {
+      setResetSubmitting(false);
     }
   };
 
@@ -522,26 +703,97 @@ export default function AdminUsersTab() {
                       </span>
                     </td>
 
-                    {/* Options (Activate / Deactivate) */}
+                    {/* Options (Edit, Reset Password, Activate/Deactivate, Delete) */}
                     <td style={{ padding: "14px 20px", textAlign: "right" }}>
-                      <button
-                        type="button"
-                        onClick={() => handleToggleStatus(u)}
-                        disabled={actionUserId === u.id}
-                        className={u.is_active ? "btn btn-secondary" : "btn btn-primary"}
-                        style={{
-                          padding: "5px 12px",
-                          fontSize: "12px",
-                          fontWeight: "500",
-                          borderRadius: "var(--radius-sm)",
-                        }}
-                      >
-                        {actionUserId === u.id
-                          ? "Updating..."
-                          : u.is_active
-                          ? "Deactivate"
-                          : "Activate"}
-                      </button>
+                      <div style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenEditModal(u)}
+                          disabled={actionUserId === u.id || deleteSubmitting || editSubmitting}
+                          title="Edit user profile"
+                          className="btn btn-secondary"
+                          style={{
+                            padding: "5px 10px",
+                            fontSize: "12px",
+                            fontWeight: "500",
+                            borderRadius: "var(--radius-sm)",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "4px",
+                          }}
+                        >
+                          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                          </svg>
+                          Edit
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleOpenResetModal(u)}
+                          disabled={actionUserId === u.id || deleteSubmitting || resetSubmitting}
+                          title="Reset password"
+                          className="btn btn-secondary"
+                          style={{
+                            padding: "5px 10px",
+                            fontSize: "12px",
+                            fontWeight: "500",
+                            borderRadius: "var(--radius-sm)",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "4px",
+                          }}
+                        >
+                          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                          </svg>
+                          Reset Password
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleToggleStatus(u)}
+                          disabled={actionUserId === u.id || deleteSubmitting}
+                          className={u.is_active ? "btn btn-secondary" : "btn btn-primary"}
+                          style={{
+                            padding: "5px 10px",
+                            fontSize: "12px",
+                            fontWeight: "500",
+                            borderRadius: "var(--radius-sm)",
+                          }}
+                        >
+                          {actionUserId === u.id
+                            ? "Updating..."
+                            : u.is_active
+                            ? "Deactivate"
+                            : "Activate"}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleOpenDeleteModal(u)}
+                          disabled={actionUserId === u.id || deleteSubmitting}
+                          title="Permanently delete user"
+                          style={{
+                            padding: "5px 10px",
+                            fontSize: "12px",
+                            fontWeight: "500",
+                            borderRadius: "var(--radius-sm)",
+                            background: "rgba(239, 68, 68, 0.1)",
+                            color: "var(--status-error)",
+                            border: "1px solid rgba(239, 68, 68, 0.2)",
+                            cursor: "pointer",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: "4px",
+                          }}
+                        >
+                          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                          Delete
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -684,19 +936,19 @@ export default function AdminUsersTab() {
 
               <div style={{ marginBottom: "14px" }}>
                 <label htmlFor="modal-email" style={{ display: "block", fontSize: "12px", fontWeight: "500", color: "var(--text-secondary)", marginBottom: "4px" }}>
-                  Email address <span style={{ color: "var(--status-error)" }}>*</span>
+                  Corporate email address <span style={{ color: "var(--status-error)" }}>*</span>
                 </label>
                 <input
                   id="modal-email"
                   type="email"
                   required
                   className="form-input"
-                  placeholder="e.g. jane.doe@gmail.com"
+                  placeholder="user@people-prime.com"
                   value={formData.email}
                   onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                 />
                 <span style={{ display: "block", fontSize: "11px", color: "var(--text-muted)", marginTop: "3px" }}>
-                  Standard corporate and Gmail addresses are accepted.
+                  Must be an official @people-prime.com company address. External domains (including Gmail) are rejected.
                 </span>
               </div>
 
@@ -783,6 +1035,458 @@ export default function AdminUsersTab() {
                   disabled={modalSubmitting}
                 >
                   {modalSubmitting ? "Creating user..." : "Add user"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      {/* Delete User Confirmation Modal */}
+      {userToDelete && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-modal-title"
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: "rgba(0, 0, 0, 0.75)",
+            backdropFilter: "blur(3px)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+            padding: "20px",
+          }}
+        >
+          <div
+            className="card"
+            style={{
+              width: "100%",
+              maxWidth: "500px",
+              padding: "24px",
+              boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.04)",
+              border: "1px solid var(--border-color)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "flex-start", gap: "16px", marginBottom: "16px" }}>
+              <div
+                style={{
+                  width: "44px",
+                  height: "44px",
+                  borderRadius: "50%",
+                  background: "rgba(239, 68, 68, 0.15)",
+                  color: "var(--status-error)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                }}
+              >
+                <svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+
+              <div style={{ flex: 1 }}>
+                <h3 id="delete-modal-title" style={{ fontSize: "18px", fontWeight: "700", color: "var(--text-main)", margin: "0 0 4px 0" }}>
+                  Permanently Delete User?
+                </h3>
+                <p style={{ fontSize: "13px", color: "var(--text-secondary)", margin: 0, lineHeight: "1.5" }}>
+                  This will physically delete the user account from the system.
+                </p>
+              </div>
+            </div>
+
+            {deleteError && (
+              <div className="alert alert-error" style={{ marginBottom: "16px" }}>
+                <span>{deleteError}</span>
+              </div>
+            )}
+
+            {/* User Details Summary Card */}
+            <div
+              style={{
+                background: "rgba(255, 255, 255, 0.03)",
+                border: "1px solid var(--border-color)",
+                borderRadius: "var(--radius-md)",
+                padding: "14px 16px",
+                marginBottom: "16px",
+                fontSize: "13px",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+                <span style={{ color: "var(--text-muted)" }}>Full name:</span>
+                <span style={{ fontWeight: "600", color: "var(--text-main)" }}>
+                  {userToDelete.name || userToDelete.username}
+                </span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+                <span style={{ color: "var(--text-muted)" }}>Email address:</span>
+                <span style={{ color: "var(--text-main)" }}>{userToDelete.email || "-"}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+                <span style={{ color: "var(--text-muted)" }}>Username:</span>
+                <span style={{ color: "var(--text-main)" }}>@{userToDelete.username}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ color: "var(--text-muted)" }}>Role:</span>
+                <span style={{ fontWeight: "600", color: "var(--primary-color)" }}>
+                  {userToDelete.user_type_label || userToDelete.role}
+                </span>
+              </div>
+            </div>
+
+            {/* Explicit Warning Callout */}
+            <div
+              style={{
+                background: "rgba(239, 68, 68, 0.08)",
+                border: "1px solid rgba(239, 68, 68, 0.25)",
+                borderRadius: "var(--radius-md)",
+                padding: "12px 14px",
+                marginBottom: "20px",
+                fontSize: "13px",
+                color: "var(--status-error)",
+                lineHeight: "1.4",
+              }}
+            >
+              <strong>Warning:</strong> Are you sure you want to permanently delete this user? Their account and associated learner records may be permanently removed. This action cannot be undone.
+            </div>
+
+            {/* Modal Actions */}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px" }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleCloseDeleteModal}
+                disabled={deleteSubmitting}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={handleConfirmDelete}
+                disabled={deleteSubmitting}
+                style={{
+                  background: "var(--status-error)",
+                  color: "#ffffff",
+                  border: "none",
+                  fontWeight: "600",
+                  padding: "8px 18px",
+                }}
+              >
+                {deleteSubmitting ? "Deleting..." : "Permanently Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit User Modal */}
+      {userToEdit && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.65)",
+            backdropFilter: "blur(4px)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+            padding: "20px",
+          }}
+        >
+          <div
+            className="card"
+            style={{
+              width: "100%",
+              maxWidth: "520px",
+              background: "var(--bg-surface)",
+              boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.3)",
+              border: "1px solid var(--border-color)",
+              padding: "24px",
+              borderRadius: "var(--radius-lg)",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+              <h3 style={{ fontSize: "18px", fontWeight: "700", color: "var(--text-main)", margin: 0 }}>
+                Edit User Profile
+              </h3>
+              <button
+                type="button"
+                onClick={handleCloseEditModal}
+                disabled={editSubmitting}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  padding: "4px",
+                }}
+              >
+                <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {editError && (
+              <div
+                style={{
+                  background: "rgba(239, 68, 68, 0.1)",
+                  border: "1px solid rgba(239, 68, 68, 0.3)",
+                  color: "var(--status-error)",
+                  padding: "10px 14px",
+                  borderRadius: "var(--radius-md)",
+                  fontSize: "13px",
+                  marginBottom: "16px",
+                }}
+              >
+                {editError}
+              </div>
+            )}
+
+            <form onSubmit={handleEditSubmit}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "14px" }}>
+                <div>
+                  <label htmlFor="edit-first-name" style={{ display: "block", fontSize: "12px", fontWeight: "500", color: "var(--text-secondary)", marginBottom: "4px" }}>
+                    First name
+                  </label>
+                  <input
+                    id="edit-first-name"
+                    type="text"
+                    className="form-input"
+                    placeholder="e.g. Jane"
+                    value={editFormData.firstName}
+                    onChange={(e) => setEditFormData({ ...editFormData, firstName: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="edit-last-name" style={{ display: "block", fontSize: "12px", fontWeight: "500", color: "var(--text-secondary)", marginBottom: "4px" }}>
+                    Last name
+                  </label>
+                  <input
+                    id="edit-last-name"
+                    type="text"
+                    className="form-input"
+                    placeholder="e.g. Doe"
+                    value={editFormData.lastName}
+                    onChange={(e) => setEditFormData({ ...editFormData, lastName: e.target.value })}
+                  />
+                </div>
+              </div>
+
+              <div style={{ marginBottom: "14px" }}>
+                <label htmlFor="edit-email" style={{ display: "block", fontSize: "12px", fontWeight: "500", color: "var(--text-secondary)", marginBottom: "4px" }}>
+                  Corporate email address <span style={{ color: "var(--status-error)" }}>*</span>
+                </label>
+                <input
+                  id="edit-email"
+                  type="email"
+                  required
+                  className="form-input"
+                  placeholder="user@people-prime.com"
+                  value={editFormData.email}
+                  onChange={(e) => setEditFormData({ ...editFormData, email: e.target.value })}
+                />
+                <span style={{ fontSize: "11px", color: "var(--text-muted)", display: "block", marginTop: "3px" }}>
+                  Must be an official @people-prime.com corporate email address.
+                </span>
+              </div>
+
+              <div style={{ marginBottom: "14px" }}>
+                <label htmlFor="edit-username" style={{ display: "block", fontSize: "12px", fontWeight: "500", color: "var(--text-secondary)", marginBottom: "4px" }}>
+                  Username <span style={{ color: "var(--status-error)" }}>*</span>
+                </label>
+                <input
+                  id="edit-username"
+                  type="text"
+                  required
+                  className="form-input"
+                  value={editFormData.username}
+                  onChange={(e) => setEditFormData({ ...editFormData, username: e.target.value })}
+                />
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "20px" }}>
+                <div>
+                  <label htmlFor="edit-role" style={{ display: "block", fontSize: "12px", fontWeight: "500", color: "var(--text-secondary)", marginBottom: "4px" }}>
+                    User type <span style={{ color: "var(--status-error)" }}>*</span>
+                  </label>
+                  <select
+                    id="edit-role"
+                    className="form-input"
+                    value={editFormData.role}
+                    onChange={(e) => setEditFormData({ ...editFormData, role: e.target.value })}
+                  >
+                    <option value="LEARNER">Learner</option>
+                    <option value="TRAINER">Trainer</option>
+                    <option value="ADMIN">Admin</option>
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="edit-status" style={{ display: "block", fontSize: "12px", fontWeight: "500", color: "var(--text-secondary)", marginBottom: "4px" }}>
+                    Account status
+                  </label>
+                  <select
+                    id="edit-status"
+                    className="form-input"
+                    value={editFormData.isActive ? "ACTIVE" : "INACTIVE"}
+                    onChange={(e) => setEditFormData({ ...editFormData, isActive: e.target.value === "ACTIVE" })}
+                  >
+                    <option value="ACTIVE">Active</option>
+                    <option value="INACTIVE">Inactive</option>
+                  </select>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px" }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={handleCloseEditModal}
+                  disabled={editSubmitting}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={editSubmitting}
+                >
+                  {editSubmitting ? "Saving..." : "Save Changes"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Reset Password Modal */}
+      {userToResetPassword && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.65)",
+            backdropFilter: "blur(4px)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+            padding: "20px",
+          }}
+        >
+          <div
+            className="card"
+            style={{
+              width: "100%",
+              maxWidth: "460px",
+              background: "var(--bg-surface)",
+              boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.3)",
+              border: "1px solid var(--border-color)",
+              padding: "24px",
+              borderRadius: "var(--radius-lg)",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+              <div>
+                <h3 style={{ fontSize: "18px", fontWeight: "700", color: "var(--text-main)", margin: "0 0 4px 0" }}>
+                  Reset User Password
+                </h3>
+                <span style={{ fontSize: "13px", color: "var(--text-muted)" }}>
+                  Resetting credentials for @{userToResetPassword.username}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={handleCloseResetModal}
+                disabled={resetSubmitting}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  padding: "4px",
+                }}
+              >
+                <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {resetError && (
+              <div
+                style={{
+                  background: "rgba(239, 68, 68, 0.1)",
+                  border: "1px solid rgba(239, 68, 68, 0.3)",
+                  color: "var(--status-error)",
+                  padding: "10px 14px",
+                  borderRadius: "var(--radius-md)",
+                  fontSize: "13px",
+                  marginBottom: "16px",
+                }}
+              >
+                {resetError}
+              </div>
+            )}
+
+            <form onSubmit={handleResetSubmit}>
+              <div style={{ marginBottom: "14px" }}>
+                <label htmlFor="reset-new-password" style={{ display: "block", fontSize: "12px", fontWeight: "500", color: "var(--text-secondary)", marginBottom: "4px" }}>
+                  New Password <span style={{ color: "var(--status-error)" }}>*</span>
+                </label>
+                <input
+                  id="reset-new-password"
+                  type="password"
+                  required
+                  className="form-input"
+                  placeholder="Enter new password"
+                  value={resetFormData.newPassword}
+                  onChange={(e) => setResetFormData({ ...resetFormData, newPassword: e.target.value })}
+                />
+              </div>
+
+              <div style={{ marginBottom: "20px" }}>
+                <label htmlFor="reset-confirm-password" style={{ display: "block", fontSize: "12px", fontWeight: "500", color: "var(--text-secondary)", marginBottom: "4px" }}>
+                  Confirm New Password <span style={{ color: "var(--status-error)" }}>*</span>
+                </label>
+                <input
+                  id="reset-confirm-password"
+                  type="password"
+                  required
+                  className="form-input"
+                  placeholder="Re-enter new password"
+                  value={resetFormData.confirmPassword}
+                  onChange={(e) => setResetFormData({ ...resetFormData, confirmPassword: e.target.value })}
+                />
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px" }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={handleCloseResetModal}
+                  disabled={resetSubmitting}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={resetSubmitting}
+                >
+                  {resetSubmitting ? "Resetting..." : "Reset Password"}
                 </button>
               </div>
             </form>

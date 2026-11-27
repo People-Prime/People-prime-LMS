@@ -93,6 +93,8 @@ from core.serializers import (
     AdminUpdateTrainerSerializer,
     AdminUserListSerializer,
     AdminCreateUserSerializer,
+    AdminUpdateUserSerializer,
+    AdminResetPasswordSerializer,
     ReportOverviewSerializer,
     ReportLearnerPerformanceItemSerializer,
     ReportCourseProgressItemSerializer,
@@ -5310,6 +5312,117 @@ class AdminUserViewSet(viewsets.ViewSet):
         read_serializer = AdminUserListSerializer(user)
         return Response(read_serializer.data, status=status.HTTP_201_CREATED)
 
+    def update(self, request, pk=None):
+        return self.partial_update(request, pk)
+
+    def partial_update(self, request, pk=None):
+        """
+        Updates profile details of an existing LMS user.
+        - Requires LMS Admin authentication.
+        - Enforces corporate @people-prime.com email validation.
+        - Enforces case-insensitive email and username uniqueness excluding self.
+        - Prevents changing own active Admin role to non-admin or deactivating self.
+        - Prevents leaving zero active Admins.
+        - Preserves existing password hash and training records.
+        """
+        self._require_admin(request)
+        try:
+            target_user = User.objects.get(pk=pk)
+        except (User.DoesNotExist, ValueError):
+            return Response(
+                {"error": "User not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Safety checks for current admin session
+        if target_user.pk == request.user.pk:
+            if "role" in request.data and request.data["role"] != User.Role.ADMIN:
+                return Response(
+                    {"error": "You cannot remove administrative privileges from your own active account."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if "is_active" in request.data and not request.data["is_active"]:
+                return Response(
+                    {"error": "You cannot deactivate your own administrative account while logged in."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Safety check: if demoting or deactivating an Admin, ensure at least one active Admin remains
+        if target_user.role == User.Role.ADMIN:
+            new_role = request.data.get("role", target_user.role)
+            new_active = request.data.get("is_active", target_user.is_active)
+            if (new_role != User.Role.ADMIN or not new_active) and target_user.is_active:
+                active_admin_count = User.objects.filter(role=User.Role.ADMIN, is_active=True).count()
+                if active_admin_count <= 1:
+                    return Response(
+                        {"error": "Cannot demote or deactivate the only active Administrator account in the system."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+        serializer = AdminUpdateUserSerializer(data=request.data, instance_user=target_user, partial=True)
+        serializer.is_valid(raise_exception=True)
+        updated_user = serializer.update(target_user, serializer.validated_data)
+
+        _log_audit(
+            request,
+            AuditAction.UPDATE,
+            "User",
+            updated_user.pk,
+            {
+                "action": "edit_user",
+                "username": updated_user.username,
+                "role": updated_user.role,
+                "email": updated_user.email,
+                "first_name": updated_user.first_name,
+                "last_name": updated_user.last_name,
+                "is_active": updated_user.is_active,
+            },
+        )
+
+        read_serializer = AdminUserListSerializer(updated_user)
+        return Response(read_serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="reset-password")
+    def reset_password(self, request, pk=None):
+        """
+        Resets an LMS user's password.
+        - Requires LMS Admin authentication.
+        - Requires new_password and confirm_password.
+        - Validates password strength using Django AUTH_PASSWORD_VALIDATORS.
+        - Uses Django set_password() (PBKDF2).
+        - Never returns the password or hash.
+        """
+        self._require_admin(request)
+        try:
+            target_user = User.objects.get(pk=pk)
+        except (User.DoesNotExist, ValueError):
+            return Response(
+                {"error": "User not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = AdminResetPasswordSerializer(data=request.data, instance_user=target_user)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        _log_audit(
+            request,
+            AuditAction.UPDATE,
+            "User",
+            target_user.pk,
+            {
+                "action": "admin_reset_password",
+                "username": target_user.username,
+                "email": target_user.email,
+                "role": target_user.role,
+            },
+        )
+
+        return Response(
+            {"message": f"Password for @{target_user.username} has been reset successfully."},
+            status=status.HTTP_200_OK,
+        )
+
     @action(detail=True, methods=["post"], url_path="deactivate")
     def deactivate(self, request, pk=None):
         self._require_admin(request)
@@ -5405,6 +5518,95 @@ class AdminUserViewSet(viewsets.ViewSet):
             {
                 "message": f"User @{target_user.username} activated successfully.",
                 "user": serializer.data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def destroy(self, request, pk=None):
+        """
+        Permanently hard-deletes a user from PostgreSQL.
+        - Requires LMS Admin authentication.
+        - Prevents self-deletion.
+        - Prevents deleting the last active Administrator.
+        - Wraps in transaction.atomic().
+        - Handles ProtectedError gracefully.
+        - Records AuditLog entry before physical removal.
+        """
+        from django.db import transaction
+        from django.db.models import ProtectedError
+
+        self._require_admin(request)
+        try:
+            target_user = User.objects.get(pk=pk)
+        except (User.DoesNotExist, ValueError):
+            return Response(
+                {"error": "User not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # 1. Prevent Admin from deleting their own active account
+        if target_user.pk == request.user.pk:
+            return Response(
+                {"error": "You cannot delete your own administrative account while logged in."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 2. Prevent deleting the last active Administrator
+        if target_user.role == User.Role.ADMIN and target_user.is_active:
+            active_admin_count = User.objects.filter(role=User.Role.ADMIN, is_active=True).count()
+            if active_admin_count <= 1:
+                return Response(
+                    {"error": "Cannot delete the only active Administrator account in the system."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        target_id = target_user.pk
+        target_username = target_user.username
+        target_email = target_user.email
+        target_role = target_user.role
+        target_name = target_user.get_full_name().strip() or target_username
+
+        try:
+            with transaction.atomic():
+                # Record audit log before hard deletion
+                _log_audit(
+                    request,
+                    AuditAction.DELETE,
+                    "User",
+                    target_id,
+                    {
+                        "username": target_username,
+                        "email": target_email,
+                        "role": target_role,
+                        "name": target_name,
+                        "deletion_type": "HARD_DELETE",
+                    },
+                )
+                target_user.delete()
+        except ProtectedError as e:
+            protected_objects = e.protected_objects
+            model_names = {obj._meta.verbose_name for obj in protected_objects}
+            models_str = ", ".join(sorted(model_names))
+            return Response(
+                {
+                    "error": (
+                        f"Cannot delete user @{target_username} because they have protected related records ({models_str}). "
+                        "Please remove or reassign these related records first."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as e:
+            logger.error("Error during hard deletion of user %s: %s", target_id, e)
+            return Response(
+                {"error": "An error occurred while deleting the user account."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(
+            {
+                "message": f"User {target_name} (@{target_username}) was permanently deleted successfully.",
+                "deleted_id": target_id,
             },
             status=status.HTTP_200_OK,
         )

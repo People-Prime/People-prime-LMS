@@ -8,6 +8,8 @@ from django.contrib.auth import get_user_model
 from rest_framework import serializers
 from rest_framework.validators import UniqueTogetherValidator
 
+from core.validators import validate_corporate_email
+
 from core.models import (
     AuditLog,
     CandidateType,
@@ -1347,10 +1349,10 @@ class AdminLearnerListSerializer(serializers.ModelSerializer):
 class AdminCreateTrainerSerializer(serializers.Serializer):
     """
     Admin-only serializer for creating new TRAINER accounts.
-    Enforces password validation, username uniqueness, and sets non-privileged trainer role.
+    Enforces password validation, username uniqueness, corporate @people-prime.com email validation, and sets non-privileged trainer role.
     """
     username = serializers.CharField(max_length=150)
-    email = serializers.EmailField(allow_blank=True, required=False)
+    email = serializers.EmailField(required=True)
     first_name = serializers.CharField(max_length=150, allow_blank=True, required=False, default="")
     last_name = serializers.CharField(max_length=150, allow_blank=True, required=False, default="")
     password = serializers.CharField(write_only=True, trim_whitespace=False, style={"input_type": "password"})
@@ -1364,8 +1366,13 @@ class AdminCreateTrainerSerializer(serializers.Serializer):
         return cleaned
 
     def validate_email(self, value):
-        cleaned = value.strip() if value else ""
-        if cleaned and User.objects.filter(email__iexact=cleaned).exists():
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        try:
+            cleaned = validate_corporate_email(value)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(list(exc.messages))
+
+        if User.objects.filter(email__iexact=cleaned).exists():
             raise serializers.ValidationError("A user with this email address already exists.")
         return cleaned
 
@@ -1563,7 +1570,7 @@ class AdminCreateUserSerializer(serializers.Serializer):
     Admin-only serializer for creating new LMS user accounts (Admin, Trainer, Learner).
     Validates:
     - First name, Last name
-    - Email (mandatory, format validated, uniqueness checked, Gmail/standard domains accepted)
+    - Email (mandatory, corporate @people-prime.com domain enforced, uniqueness checked)
     - Username (mandatory, unique, defaults to email if omitted)
     - Role (ADMIN, TRAINER, LEARNER)
     - Password (validated against Django AUTH_PASSWORD_VALIDATORS)
@@ -1578,9 +1585,12 @@ class AdminCreateUserSerializer(serializers.Serializer):
     is_active = serializers.BooleanField(default=True, required=False)
 
     def validate_email(self, value):
-        cleaned = value.strip().lower()
-        if not cleaned:
-            raise serializers.ValidationError("Email address is required.")
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        try:
+            cleaned = validate_corporate_email(value)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(list(exc.messages))
+
         if User.objects.filter(email__iexact=cleaned).exists():
             raise serializers.ValidationError("A user with this email address already exists.")
         return cleaned
@@ -1653,6 +1663,135 @@ class AdminCreateUserSerializer(serializers.Serializer):
             return user
         except IntegrityError:
             raise serializers.ValidationError({"username": ["A user with this username or email already exists."]})
+
+
+class AdminUpdateUserSerializer(serializers.Serializer):
+    """
+    Admin-only serializer for updating profile details of an existing user.
+    Permits updating:
+    - first_name (optional, blank allowed)
+    - last_name (optional, blank allowed)
+    - email (optional on PATCH, validated for @people-prime.com, case-insensitive uniqueness excluding self)
+    - username (optional on PATCH, case-insensitive uniqueness excluding self)
+    - role (optional, ADMIN, TRAINER, LEARNER)
+    - is_active (optional, boolean)
+
+    Does NOT accept or handle password fields.
+    """
+    first_name = serializers.CharField(max_length=150, allow_blank=True, required=False)
+    last_name = serializers.CharField(max_length=150, allow_blank=True, required=False)
+    email = serializers.EmailField(required=False)
+    username = serializers.CharField(max_length=150, required=False)
+    role = serializers.ChoiceField(choices=User.Role.choices, required=False)
+    is_active = serializers.BooleanField(required=False)
+
+    def __init__(self, *args, **kwargs):
+        self.instance_user = kwargs.pop("instance_user", None)
+        super().__init__(*args, **kwargs)
+
+    def validate_email(self, value):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        try:
+            cleaned = validate_corporate_email(value)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(list(exc.messages))
+
+        qs = User.objects.filter(email__iexact=cleaned)
+        if self.instance_user:
+            qs = qs.exclude(pk=self.instance_user.pk)
+        if qs.exists():
+            raise serializers.ValidationError("A user with this email address already exists.")
+        return cleaned
+
+    def validate_username(self, value):
+        cleaned = value.strip()
+        if not cleaned:
+            raise serializers.ValidationError("Username cannot be blank.")
+        qs = User.objects.filter(username__iexact=cleaned)
+        if self.instance_user:
+            qs = qs.exclude(pk=self.instance_user.pk)
+        if qs.exists():
+            raise serializers.ValidationError("A user with this username already exists.")
+        return cleaned
+
+    def update(self, instance, validated_data):
+        from django.db import IntegrityError
+        update_fields = []
+        if "first_name" in validated_data:
+            instance.first_name = validated_data["first_name"].strip()
+            update_fields.append("first_name")
+        if "last_name" in validated_data:
+            instance.last_name = validated_data["last_name"].strip()
+            update_fields.append("last_name")
+        if "email" in validated_data:
+            instance.email = validated_data["email"].strip().lower()
+            update_fields.append("email")
+        if "username" in validated_data:
+            instance.username = validated_data["username"].strip()
+            update_fields.append("username")
+        if "role" in validated_data:
+            instance.role = validated_data["role"]
+            update_fields.append("role")
+        if "is_active" in validated_data:
+            instance.is_active = validated_data["is_active"]
+            update_fields.append("is_active")
+
+        if update_fields:
+            try:
+                instance.save(update_fields=update_fields)
+            except IntegrityError:
+                raise serializers.ValidationError({"error": "Failed to update user due to a database constraint violation."})
+        return instance
+
+
+class AdminResetPasswordSerializer(serializers.Serializer):
+    """
+    Admin-only serializer for resetting a user's password.
+    Requires new_password and confirm_password.
+    Validates matching passwords and Django AUTH_PASSWORD_VALIDATORS.
+    Uses set_password(). Never returns password hashes.
+    """
+    new_password = serializers.CharField(
+        write_only=True,
+        required=True,
+        trim_whitespace=False,
+        style={"input_type": "password"},
+    )
+    confirm_password = serializers.CharField(
+        write_only=True,
+        required=True,
+        trim_whitespace=False,
+        style={"input_type": "password"},
+    )
+
+    def __init__(self, *args, **kwargs):
+        self.instance_user = kwargs.pop("instance_user", None)
+        super().__init__(*args, **kwargs)
+
+    def validate(self, attrs):
+        new_password = attrs.get("new_password", "")
+        confirm_password = attrs.get("confirm_password", "")
+
+        if not new_password:
+            raise serializers.ValidationError({"new_password": ["Password cannot be blank."]})
+
+        if new_password != confirm_password:
+            raise serializers.ValidationError({"confirm_password": ["Passwords do not match."]})
+
+        from django.contrib.auth.password_validation import validate_password
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        try:
+            validate_password(new_password, user=self.instance_user)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({"new_password": list(exc.messages)})
+
+        return attrs
+
+    def save(self):
+        new_password = self.validated_data["new_password"]
+        self.instance_user.set_password(new_password)
+        self.instance_user.save(update_fields=["password"])
+        return self.instance_user
 
 
 # =============================================================================

@@ -6,7 +6,7 @@ export default function LoginPage() {
   const { user, isAuthenticated, login } = useAuth();
   const location = useLocation();
 
-  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
@@ -40,10 +40,17 @@ export default function LoginPage() {
   const handleSubmit = async (event) => {
     event.preventDefault();
     setErrorMessage("");
+
+    const cleanEmail = email.trim();
+    if (!cleanEmail.toLowerCase().endsWith("@people-prime.com")) {
+      setErrorMessage("Please sign in using your registered @people-prime.com email address.");
+      return;
+    }
+
     setIsSubmitting(true);
 
     try {
-      await login(username, password);
+      await login(cleanEmail, password);
       // Navigation is triggered by reactive re-render when isAuthenticated becomes true
     } catch (error) {
       setErrorMessage(error.message || "Unable to sign in. Please check your credentials.");
@@ -79,18 +86,18 @@ export default function LoginPage() {
 
         <form onSubmit={handleSubmit} noValidate>
           <div className="form-group">
-            <label htmlFor="username" className="form-label">
-              Username or Corporate Email
+            <label htmlFor="email" className="form-label">
+              Corporate Email
             </label>
             <div className="form-input-wrapper">
               <input
-                id="username"
-                type="text"
+                id="email"
+                type="email"
                 className="form-input"
-                placeholder="Enter your username"
-                value={username}
-                onChange={(event) => setUsername(event.target.value)}
-                autoComplete="username"
+                placeholder="name@people-prime.com"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                autoComplete="email"
                 required
                 disabled={isSubmitting}
               />
@@ -128,7 +135,7 @@ export default function LoginPage() {
           <button
             type="submit"
             className="btn btn-primary btn-full"
-            disabled={isSubmitting || !username.trim() || !password}
+            disabled={isSubmitting || !email.trim() || !password}
             style={{ marginTop: "8px" }}
           >
             {isSubmitting ? "Authenticating..." : "Sign In to Portal"}

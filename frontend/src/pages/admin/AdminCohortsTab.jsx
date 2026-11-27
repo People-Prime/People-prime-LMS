@@ -360,6 +360,15 @@ export default function AdminCohortsTab() {
       setError("Username and Password are required.");
       return;
     }
+    const cleanEmail = newTrainerEmail.trim();
+    if (!cleanEmail) {
+      setError("Corporate Email is required.");
+      return;
+    }
+    if (!cleanEmail.toLowerCase().endsWith("@people-prime.com")) {
+      setError("Only corporate @people-prime.com email addresses are permitted.");
+      return;
+    }
     setSubmitting(true);
     setError(null);
     setSuccessMessage("");
@@ -368,7 +377,7 @@ export default function AdminCohortsTab() {
         method: "POST",
         body: {
           username: newTrainerUsername.trim(),
-          email: newTrainerEmail.trim(),
+          email: cleanEmail,
           first_name: newTrainerFirstName.trim(),
           last_name: newTrainerLastName.trim(),
           password: newTrainerPassword,
@@ -1676,15 +1685,19 @@ export default function AdminCohortsTab() {
               </div>
 
               <div className="form-group">
-                <label className="form-label" htmlFor="trnMgtEmail">Email (Optional)</label>
+                <label className="form-label" htmlFor="trnMgtEmail">Corporate Email *</label>
                 <input
                   id="trnMgtEmail"
                   type="email"
                   className="form-input"
-                  placeholder="e.g. trainer@peopleprime.com"
+                  placeholder="e.g. trainer@people-prime.com"
                   value={newTrainerEmail}
                   onChange={(e) => setNewTrainerEmail(e.target.value)}
+                  required
                 />
+                <span style={{ display: "block", fontSize: "11px", color: "var(--text-muted)", marginTop: "3px" }}>
+                  Must be an official @people-prime.com company address.
+                </span>
               </div>
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>

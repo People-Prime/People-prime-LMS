@@ -61,7 +61,8 @@ def csrf_token(request):
 def session_login(request):
     """
     Public session login endpoint.
-    Authenticates valid active users and sets a secure session cookie.
+    Authenticates valid active users via registered corporate @people-prime.com email and sets a secure session cookie.
+    Rejects usernames, Gmail, and any other non-company email domain.
     """
     try:
         data = json.loads(request.body)
@@ -77,38 +78,58 @@ def session_login(request):
             status=400,
         )
 
-    username = data.get("username")
+    # Support either 'email' or legacy 'username' payload key, but value must be a corporate email
+    email_input = data.get("email") or data.get("username")
     password = data.get("password")
 
-    if not isinstance(username, str) or not isinstance(password, str):
+    if not isinstance(email_input, str) or not isinstance(password, str):
         return JsonResponse(
-            {"error": "Username and password are required."},
+            {"error": "Please sign in using your registered @people-prime.com email address."},
             status=400,
         )
 
-    username_clean = username.strip()
-    if not username_clean or not password:
+    email_clean = email_input.strip()
+    if not email_clean or not password:
         return JsonResponse(
-            {"error": "Username and password are required."},
+            {"error": "Please sign in using your registered @people-prime.com email address."},
             status=400,
         )
 
-    # Resolve email to username if input contains '@'
-    auth_username = username_clean
-    if "@" in username_clean:
-        matched_users = User.objects.filter(email__iexact=username_clean)
-        match_count = matched_users.count()
-        if match_count == 1:
-            auth_username = matched_users.first().username
-        elif match_count > 1:
-            # If multiple accounts share the same email, reject authentication safely
-            return JsonResponse(
-                {"error": "Invalid username or password."},
-                status=401,
-            )
-        else:
-            # No email found; allow authenticate() to fail normally without exposing account existence
-            auth_username = username_clean
+    # Reject plain usernames or invalid corporate domain formats
+    from core.validators import validate_corporate_email, ValidationError as CoreValidationError
+    try:
+        normalized_email = validate_corporate_email(email_clean)
+    except CoreValidationError:
+        return JsonResponse(
+            {"error": "Please sign in using your registered @people-prime.com email address."},
+            status=400,
+        )
+
+    # Resolve account strictly by normalized corporate email
+    matched_users = User.objects.filter(email__iexact=normalized_email)
+    match_count = matched_users.count()
+    if match_count == 1:
+        target_user = matched_users.first()
+        auth_username = target_user.username
+    elif match_count > 1:
+        # Multiple accounts sharing same email -> reject safely
+        return JsonResponse(
+            {"error": "Invalid username or password."},
+            status=401,
+        )
+    else:
+        # No matching account found -> fail authentication cleanly
+        return JsonResponse(
+            {"error": "Invalid username or password."},
+            status=401,
+        )
+
+    # Check if target account is inactive before authentication (or if user is inactive)
+    if not target_user.is_active:
+        return JsonResponse(
+            {"error": "This account is inactive."},
+            status=403,
+        )
 
     user = authenticate(
         request,

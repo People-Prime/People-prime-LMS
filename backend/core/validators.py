@@ -9,6 +9,36 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.utils.text import slugify
 
+# Permitted corporate email domain
+CORPORATE_EMAIL_DOMAIN = "@people-prime.com"
+
+
+def validate_corporate_email(email_str):
+    """
+    Validates that the provided email string belongs to the official @people-prime.com domain.
+    Rejects missing emails, whitespace-only strings, Gmail, and any other external domain.
+    Performs case-insensitive exact domain matching.
+    Returns the normalized, lowercased, stripped email string.
+    Raises ValidationError if invalid.
+    """
+    if not email_str or not isinstance(email_str, str):
+        raise ValidationError("Only corporate @people-prime.com email addresses are permitted.")
+
+    cleaned = email_str.strip().lower()
+    if not cleaned:
+        raise ValidationError("Only corporate @people-prime.com email addresses are permitted.")
+
+    if not cleaned.endswith(CORPORATE_EMAIL_DOMAIN):
+        raise ValidationError("Only corporate @people-prime.com email addresses are permitted.")
+
+    # Ensure there is a non-empty local-part before '@people-prime.com'
+    local_part = cleaned[:-len(CORPORATE_EMAIL_DOMAIN)]
+    if not local_part or "@" in local_part or "/" in local_part or "\\" in local_part:
+        raise ValidationError("Only corporate @people-prime.com email addresses are permitted.")
+
+    return cleaned
+
+
 # Permitted file extensions grouped by category
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".webm"}

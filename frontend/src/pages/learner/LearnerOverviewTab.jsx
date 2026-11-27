@@ -9,7 +9,6 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
   const [courses, setCourses] = useState([]);
   const [modules, setModules] = useState([]);
   const [courseLevels, setCourseLevels] = useState([]);
-  const [totalLmsModules, setTotalLmsModules] = useState(0);
   const [moduleProgressMap, setModuleProgressMap] = useState({});
   const [recentResponses, setRecentResponses] = useState([]);
   const [trainers, setTrainers] = useState([]);
@@ -22,12 +21,11 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
       setLoading(true);
       setError(null);
 
-      // Fetch assigned courses, modules, LMS-wide total modules, recent question responses, and assigned trainers in parallel
-      const [coursesRes, modulesRes, levelsRes, totalModulesRes, responsesRes, trainersRes] = await Promise.all([
+      // Fetch assigned courses, modules, recent question responses, and assigned trainers in parallel
+      const [coursesRes, modulesRes, levelsRes, responsesRes, trainersRes] = await Promise.all([
         apiClient("/courses/"),
         apiClient("/modules/"),
         apiClient("/course-levels/").catch(() => []),
-        apiClient("/modules/total-count/").catch(() => null),
         apiClient("/question-responses/"),
         apiClient("/trainer-assignments/"),
       ]);
@@ -41,11 +39,6 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
       setCourses(courseList);
       setModules(moduleList);
       setCourseLevels(levelList);
-      if (totalModulesRes && typeof totalModulesRes.total_modules === "number") {
-        setTotalLmsModules(totalModulesRes.total_modules);
-      } else {
-        setTotalLmsModules(moduleList.length);
-      }
       setRecentResponses(responseList);
       setTrainers(trainerList);
 
@@ -83,11 +76,10 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
         setLoading(true);
         setError(null);
 
-        const [coursesRes, modulesRes, levelsRes, totalModulesRes, responsesRes, trainersRes] = await Promise.all([
+        const [coursesRes, modulesRes, levelsRes, responsesRes, trainersRes] = await Promise.all([
           apiClient("/courses/"),
           apiClient("/modules/"),
           apiClient("/course-levels/").catch(() => []),
-          apiClient("/modules/total-count/").catch(() => null),
           apiClient("/question-responses/"),
           apiClient("/trainer-assignments/"),
         ]);
@@ -103,11 +95,6 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
         setCourses(courseList);
         setModules(moduleList);
         setCourseLevels(levelList);
-        if (totalModulesRes && typeof totalModulesRes.total_modules === "number") {
-          setTotalLmsModules(totalModulesRes.total_modules);
-        } else {
-          setTotalLmsModules(moduleList.length);
-        }
         setRecentResponses(responseList);
         setTrainers(trainerList);
 
@@ -359,8 +346,8 @@ export default function LearnerOverviewTab({ onNavigateToCourses, onSelectCourse
       <div className="stats-grid" style={{ marginBottom: "28px" }}>
         <div className="stat-card">
           <div className="stat-header">Total Modules</div>
-          <div className="stat-value">{totalLmsModules}</div>
-          <div className="stat-footer">Active curriculum modules</div>
+          <div className="stat-value">{totalAssignedModules}</div>
+          <div className="stat-footer">Assigned curriculum modules</div>
         </div>
 
         <div className="stat-card">
